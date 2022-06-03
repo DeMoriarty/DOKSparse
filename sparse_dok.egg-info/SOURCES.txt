@@ -1,3 +1,4 @@
+MANIFEST.in
 setup.py
 sparse_dok/__init__.py
 sparse_dok/__version__.py
@@ -13,5 +14,18 @@ sparse_dok/components/cuda_callable.py
 sparse_dok/components/cuda_closed_hashmap.py
 sparse_dok/components/sparse_dok_tensor.py
 sparse_dok/components/cuda/__init__.py
+sparse_dok/components/cuda/binary_search.cu
+sparse_dok/components/cuda/bitonic.cu
+sparse_dok/components/cuda/bmm_helpers.cu
+sparse_dok/components/cuda/closed_hashmap_impl.cu
 sparse_dok/components/cuda/closed_hashmap_impl.py
+sparse_dok/components/cuda/hashmap.cu
+sparse_dok/components/cuda/head.cu
+sparse_dok/components/cuda/preview.cu
+sparse_dok/components/cuda/reduce.cu
+sparse_dok/components/cuda/smem_hashmap.cu
+sparse_dok/components/cuda/smem_hashmap_simple.cu
+sparse_dok/components/cuda/smem_tensor.cu
+sparse_dok/components/cuda/stack.cu
+sparse_dok/components/cuda/topkspspcsim.cu
 sparse_dok/components/cuda/topkspspcsim.py

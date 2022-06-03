@@ -121,9 +121,9 @@ class CudaClosedHashmap:
   def key_perm(self):
     if self._key_perm is None:
       assert self._keys is not None
-      self._key_perm = torch.arange(math.prod(self.key_shape), device=self.device)
+      self._key_perm = torch.arange(np.prod(self.key_shape), device=self.device)
     else:
-      assert self._key_perm.shape[0] == math.prod(self.key_shape)
+      assert self._key_perm.shape[0] == np.prod(self.key_shape)
     return self._key_perm
 
   @key_perm.setter
@@ -166,7 +166,7 @@ class CudaClosedHashmap:
     self._beta2 = self._beta2[ordering] 
     self._prime1 = self._prime1[ordering] 
     self._prime2 = self._prime2[ordering]
-    self._key_size = math.prod(self._keys.shape[1:])
+    self._key_size = np.prod(self._keys.shape[1:])
 
   def clone(self, deepclone=False):
     if deepclone:

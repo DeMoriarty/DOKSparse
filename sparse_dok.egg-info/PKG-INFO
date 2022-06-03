@@ -1,12 +1,12 @@
 Metadata-Version: 2.1
 Name: sparse-dok
-Version: 0.1.1
+Version: 0.1.2
 Summary: sparse dok tensor implementation
 Home-page: https://github.com/DeMoriarty/SparseDOK
 Author: demoriarty
 Author-email: sahbanjan@gmail.com
 License: MIT
-Download-URL: https://github.com/DeMoriarty/SparseDOK/archive/v_011.tar.gz
+Download-URL: https://github.com/DeMoriarty/SparseDOK/archive/v_012.tar.gz
 Keywords: pytorch,sparse
 Platform: UNKNOWN
 Classifier: Development Status :: 3 - Alpha
