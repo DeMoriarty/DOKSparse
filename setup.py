@@ -20,8 +20,7 @@ setup(
   install_requires=[ 
     'numpy',
     'torch>=1.10.0',
-    'matplotlib',
-    ''
+    'sympy'
   ],
   classifiers=[
     'Development Status :: 3 - Alpha',

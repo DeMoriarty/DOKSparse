@@ -30,10 +30,10 @@ def support_dense(func):
 
 @support_dense
 def sum(
-    input : Tensor,
-    dim : Optional[Union[int, tuple[int], list[int]]] = None, 
-    keepdim : bool = False,
-  ) -> Tensor :
+    input,
+    dim = None, 
+    keepdim = False,
+  ):
   # if not tensor.is_sparse:
   #   return torch.sum(tensor, dim=dim, keepdim=keepdim)
 
@@ -56,11 +56,11 @@ def sum(
 
 @support_dense
 def norm(
-    input : Tensor, 
-    dim : Optional[Union[int, tuple[int], list[int]]] = None,
-    p : float = 2, 
-    keepdim : bool = False,
-  ) -> Tensor:
+    input, 
+    dim = None,
+    p = 2, 
+    keepdim = False,
+  ):
   # if not tensor.is_sparse:
   #   return torch.norm(tensor, dim=dim, p=p, keepdim=keepdim)
 
@@ -99,9 +99,9 @@ def norm(
 
 @support_dense
 def softmax(
-    input : Tensor, 
-    dim : int = -1,
-  ) -> Tensor:
+    input, 
+    dim = -1,
+  ):
   dim = dim % input.ndim
   # if not tensor.is_sparse:
   #   return torch.softmax(tensor, dim=dim)
@@ -110,9 +110,9 @@ def softmax(
 
 @support_dense
 def log_softmax(
-    input : Tensor, 
-    dim : int = -1,
-  ) -> Tensor:
+    input, 
+    dim = -1,
+  ):
   dim = dim % input.ndim
   # if not tensor.is_sparse:
   #   return torch.log_softmax(tensor, dim=dim)
@@ -121,11 +121,11 @@ def log_softmax(
 
 @support_dense
 def normalize(
-    input : Tensor,
-    dim : int = 0,
-    p : float = 2,
-    eps : float = 1e-12,
-  ) -> Tensor:
+    input,
+    dim = 0,
+    p = 2,
+    eps = 1e-12,
+  ):
   # if not input.is_sparse:
   #   return F.normalize(input, dim=dim, p=p, eps=eps)
   dim = dim % input.ndim
@@ -161,10 +161,10 @@ def normalize(
     return y.pow(1 / p)
 
 def normalize_(
-    input : Tensor,
-    dim : int = -1,
-    p : float = 2,
-    eps : float = 1e-12,
+    input,
+    dim = -1,
+    p  = 2,
+    eps = 1e-12,
   ):
   dim = dim % input.ndim
   if input.is_sparse or input.is_sparse_csr:
@@ -175,10 +175,10 @@ def normalize_(
     input.div_(input_norm)
   return input
 
-def freq2prob(freqs : Tensor, dim=-1) -> Tensor:
+def freq2prob(freqs, dim=-1):
   return normalize(freqs, dim=dim, p=1)
 
-def cross_entropy(probs : Tensor, labels : Tensor, reduction="mean"):
+def cross_entropy(probs, labels, reduction="mean"):
   """
     probs : Tensor, shape = [n, v]
     labels : Tensor, shape = [n]
@@ -198,7 +198,7 @@ topkspsp_inner = TopkSPSPCSIM(sim_type="inner")
 topkspsp_nl1 = TopkSPSPCSIM(sim_type="nl1")
 topkspsp_nl2 = TopkSPSPCSIM(sim_type="nl2")
 
-def sparse_topk_inner(a : Tensor, b : Tensor, dim=1, k=1):
+def sparse_topk_inner(a, b, dim=1, k=1):
   assert b.ndim == a.ndim == 2
   dim = dim % a.ndim
   assert dim == 1
@@ -206,7 +206,7 @@ def sparse_topk_inner(a : Tensor, b : Tensor, dim=1, k=1):
   assert b.layout in {torch.sparse_coo, torch.sparse_csr}
   return topkspsp_inner(a, b, k=k)
 
-def sparse_topk_nl1(a : Tensor, b : Tensor, dim=1, k=1):
+def sparse_topk_nl1(a, b, dim=1, k=1):
   assert b.ndim == a.ndim == 2
   dim = dim % a.ndim
   assert dim == 1
@@ -214,7 +214,7 @@ def sparse_topk_nl1(a : Tensor, b : Tensor, dim=1, k=1):
   assert b.layout in {torch.sparse_coo, torch.sparse_csr}
   return topkspsp_nl1(a, b, k=k)
 
-def sparse_topk_nl2(a : Tensor, b : Tensor, dim=1, k=1):
+def sparse_topk_nl2(a, b, dim=1, k=1):
   assert b.ndim == a.ndim == 2
   dim = dim % a.ndim
   assert dim == 1
@@ -222,7 +222,7 @@ def sparse_topk_nl2(a : Tensor, b : Tensor, dim=1, k=1):
   assert b.layout in {torch.sparse_coo, torch.sparse_csr}
   return topkspsp_nl2(a, b, k=k)
 
-def sparse_topk_cos(a : Tensor, b : Tensor, dim=1, k=1):
+def sparse_topk_cos(a, b, dim=1, k=1):
   assert b.ndim == a.ndim == 2
   dim = dim % a.ndim
   assert dim == 1
