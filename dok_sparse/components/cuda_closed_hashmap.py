@@ -1,19 +1,12 @@
-import uuid
-from regex import E
 import torch
-import cupy as cp
-import torch.nn as nn
 import numpy as np
 import math
 import sympy
-import random
 from typing import Optional, Union, Iterable
 from torchtimer import ProfilingTimer
 from pathlib import Path
 from torch import Tensor
 
-# from UWOT.components.cuda.hash_map_set_v4 import HashMapSetCuda
-# from UWOT.components.cuda.hash_map_get import HashMapGetCuda
 from .cuda.closed_hashmap_impl import ClosedHashmapImplCuda
 from ..util import str2dtype, next_power_of_2, unique_first_occurrence, expand_tensor, batch_allclose
 

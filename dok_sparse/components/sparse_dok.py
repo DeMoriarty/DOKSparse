@@ -3,9 +3,10 @@ import torch
 import numpy as np
 from torch import Tensor
 from torchtimer import ProfilingTimer
-from UWOT.components.cuda_closed_hashmap import CudaClosedHashmap
-from UWOT.util import str2dtype, next_power_of_2
-from UWOT import functions as fs
+
+from .cuda_closed_hashmap import CudaClosedHashmap
+from ..util import str2dtype, next_power_of_2
+from .. import functions as fs
 
 class SparseDOKTensor(object):
   def __init__(self, size, indices=None, values=None, device=None, dtype=None):
@@ -27,14 +28,6 @@ class SparseDOKTensor(object):
         self._dtype = torch.float32
     else:
       self._dtype = str2dtype(dtype)
-
-    # if subkey_inds is not None:
-    #   assert isinstance(subkey_inds, Iterable)
-    #   if not isinstance(subkey_inds, Tensor):
-    #     self.subkey_inds = torch.tensor(subkey_inds, device=self.device, dtype=torch.long)
-    #   self.subkey_inds = self.subkey_inds % self.ndim
-    # else:
-    #   self.subkey_inds = None
 
     if indices is None:
       self._hashmap = CudaClosedHashmap(
