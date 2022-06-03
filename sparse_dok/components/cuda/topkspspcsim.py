@@ -8,8 +8,8 @@ from typing import Union
 import sympy
 from torchtimer import ProfilingTimer
 
-from UWOT.components.cuda_callable import CudaCallable
-from UWOT.util import get_absolute_path
+from ..cuda_callable import CudaCallable
+from ...util import get_absolute_path
 
 ProblemSize = namedtuple("ProblemSize", ["m", "n", "k"])
 
