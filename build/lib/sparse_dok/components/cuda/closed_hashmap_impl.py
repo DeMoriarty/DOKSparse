@@ -3,8 +3,8 @@ import torch
 import math
 from torch import Tensor
 
-from UWOT.components.cuda_callable import CudaCallable
-from UWOT.util import get_absolute_path, dtype2ctype, str2dtype
+from ..cuda_callable import CudaCallable
+from ...util import get_absolute_path, dtype2ctype, str2dtype
 
 class ClosedHashmapImplCuda(CudaCallable):
   def __init__(

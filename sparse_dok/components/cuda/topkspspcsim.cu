@@ -213,9 +213,10 @@ __global__ void topkspspcsim(
             if (P == 0.f){
               cVals[d] += dif == 0.f ? 0.f : 1.f;
             } else {
-              if (P % 2.f == 1.f){
-                dif = fabsf(dif);
-              }
+              // if (P % 2.f == 1.f){
+              //   dif = fabsf(dif);
+              // }
+              dif = fabsf(dif);
               cVals[d] += powf(dif, P);
             }
           }

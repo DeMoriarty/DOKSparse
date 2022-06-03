@@ -57,7 +57,7 @@ class TopkSPSPCSIMCuda(CudaCallable):
       "binary_search.cu",
       # "smem_hashmap.cu",
       "reduce.cu",
-      "topkspspmm_v8.cu",
+      "topkspspcsim.cu",
     ]
       
     kernel = []
@@ -84,7 +84,7 @@ class TopkSPSPCSIMCuda(CudaCallable):
 
     self.fn = cp.RawKernel(
       self.kernel,
-      "topkspspmm",
+      "topkspspcsim",
       backend="nvcc",
       options=(
         '-std=c++17',
@@ -208,8 +208,10 @@ class TopkSPSPCSIM:
   def __init__(self, sim_type):
     # self.nnzpr_ranges = [0, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
     # self.tile_ms =      [4, 4, 4, 4, 4,  4,  4,  4,   3,   1,   1]
-    self.nnzpr_ranges = [0, 4, 16, 64, 256, 512, 1024, 2048]
-    self.tile_ms =      [   4, 4,  4,  4,   3,   1,    1]
+    # self.nnzpr_ranges = [0, 4, 16, 64, 256, 512, 1024, 2048]
+    # self.tile_ms =      [   4, 4,  4,  4,   3,   1,    1]
+    self.nnzpr_ranges = [0, 32, 256, 512, 1024, 2048]
+    self.tile_ms =      [   4,  4,   3,   1,    1]
     self.tpbs = [128, 256, 512, 1024]
     self.timer = ProfilingTimer(False, name="TopkSPSPCSIM")
     for i in range(len(self.nnzpr_ranges) - 1):

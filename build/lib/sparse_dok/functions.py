@@ -194,9 +194,9 @@ def cross_entropy(probs, labels, reduction="mean"):
 
   return ce
 
-topkspsp_inner = TopkSPSPCSIM(sim_type="inner")
-topkspsp_nl1 = TopkSPSPCSIM(sim_type="nl1")
-topkspsp_nl2 = TopkSPSPCSIM(sim_type="nl2")
+topkspsp_inner = None
+topkspsp_nl1 = None
+topkspsp_nl2 = None
 
 def sparse_topk_inner(a, b, dim=1, k=1):
   assert b.ndim == a.ndim == 2
@@ -204,6 +204,9 @@ def sparse_topk_inner(a, b, dim=1, k=1):
   assert dim == 1
   assert a.layout in {torch.sparse_coo, torch.sparse_csr}
   assert b.layout in {torch.sparse_coo, torch.sparse_csr}
+  global topkspsp_inner
+  if topkspsp_inner is None:
+    topkspsp_inner = TopkSPSPCSIM(sim_type="inner")
   return topkspsp_inner(a, b, k=k)
 
 def sparse_topk_nl1(a, b, dim=1, k=1):
@@ -212,6 +215,9 @@ def sparse_topk_nl1(a, b, dim=1, k=1):
   assert dim == 1
   assert a.layout in {torch.sparse_coo, torch.sparse_csr}
   assert b.layout in {torch.sparse_coo, torch.sparse_csr}
+  global topkspsp_nl1
+  if topkspsp_nl1 is None:
+    topkspsp_nl1 = TopkSPSPCSIM(sim_type="nl1")
   return topkspsp_nl1(a, b, k=k)
 
 def sparse_topk_nl2(a, b, dim=1, k=1):
@@ -220,6 +226,9 @@ def sparse_topk_nl2(a, b, dim=1, k=1):
   assert dim == 1
   assert a.layout in {torch.sparse_coo, torch.sparse_csr}
   assert b.layout in {torch.sparse_coo, torch.sparse_csr}
+  global topkspsp_nl2
+  if topkspsp_nl2 is None:
+    topkspsp_nl2 = TopkSPSPCSIM(sim_type="nl2")
   return topkspsp_nl2(a, b, k=k)
 
 def sparse_topk_cos(a, b, dim=1, k=1):
@@ -230,4 +239,7 @@ def sparse_topk_cos(a, b, dim=1, k=1):
   assert b.layout in {torch.sparse_coo, torch.sparse_csr}
   a = normalize(a, dim=-1)
   b = normalize(b, dim=-1)
+  global topkspsp_inner
+  if topkspsp_inner is None:
+    topkspsp_inner = TopkSPSPCSIM(sim_type="inner")
   return topkspsp_inner(a, b, k=k)
