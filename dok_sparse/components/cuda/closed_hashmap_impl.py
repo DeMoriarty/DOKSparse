@@ -1,12 +1,7 @@
-from collections import namedtuple
 import cupy as cp
 import torch
-import numpy as np
 import math
 from torch import Tensor
-from typing import Iterable, Union, Optional
-import sympy
-from torchtimer import ProfilingTimer
 
 from UWOT.components.cuda_callable import CudaCallable
 from UWOT.util import get_absolute_path, dtype2ctype, str2dtype
@@ -84,19 +79,19 @@ class ClosedHashmapImplCuda(CudaCallable):
   
   def get(
       self,
-      prime1: Tensor,
-      prime2: Tensor,
-      alpha1: Tensor,
-      alpha2: Tensor,
-      beta1: Tensor,
-      beta2: Tensor,
-      key_perm : Tensor,
-      keys: Tensor, #[n_keys, key_size]
-      all_keys: Tensor, #[n_all_keys, key_size]
-      all_values: Tensor, #[n_all_keys, value_size]
-      all_uuids: Tensor, #[n_all_keys]
-      values: Optional[Tensor] = None, #[n_keys, value_size]
-      fallback_value: Optional[Tensor] = None, #[value_size]
+      prime1,
+      prime2,
+      alpha1,
+      alpha2,
+      beta1,
+      beta2,
+      key_perm ,
+      keys, #[n_keys, key_size]
+      all_keys, #[n_all_keys, key_size]
+      all_values, #[n_all_keys, value_size]
+      all_uuids, #[n_all_keys]
+      values = None, #[n_keys, value_size]
+      fallback_value = None, #[value_size]
     ):
     assert keys.ndim == all_keys.ndim == all_values.ndim == 2
     assert all_keys.shape[1] == keys.shape[1] == self.key_size
@@ -174,18 +169,18 @@ class ClosedHashmapImplCuda(CudaCallable):
 
   def set(
       self,
-      prime1: Tensor,
-      prime2: Tensor,
-      alpha1: Tensor,
-      alpha2: Tensor,
-      beta1: Tensor,
-      beta2: Tensor,
-      key_perm : Tensor,
-      keys: Tensor, #[n_keys, key_size]
-      values: Tensor, #[n_keys, value_size]
-      all_keys: Tensor, #[n_all_keys, key_size]
-      all_values: Tensor, #[n_all_keys, value_size]
-      all_uuids: Tensor, #[n_all_keys]
+      prime1,
+      prime2,
+      alpha1,
+      alpha2,
+      beta1,
+      beta2,
+      key_perm,
+      keys, #[n_keys, key_size]
+      values, #[n_keys, value_size]
+      all_keys, #[n_all_keys, key_size]
+      all_values, #[n_all_keys, value_size]
+      all_uuids, #[n_all_keys]
     ):
     assert keys.ndim == values.ndim == all_keys.ndim == all_values.ndim == 2
     assert values.shape[0] == keys.shape[0]

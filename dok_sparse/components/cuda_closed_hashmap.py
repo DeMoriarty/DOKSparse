@@ -2,8 +2,6 @@ import torch
 import numpy as np
 import math
 import sympy
-from typing import Optional, Union, Iterable
-from torchtimer import ProfilingTimer
 from pathlib import Path
 from torch import Tensor
 
@@ -13,18 +11,18 @@ from ..util import str2dtype, next_power_of_2, unique_first_occurrence, expand_t
 class CudaClosedHashmap:
   def __init__(
       self, 
-      n_buckets : int,
-      device : Union[str, torch.device, int] = "cuda:0",
-      prime1 : Optional[Iterable] = None,
-      prime2 : Optional[Iterable] = None,
-      alpha1 : Optional[Iterable] = None,
-      alpha2 : Optional[Iterable] = None,
-      beta1 : Optional[Iterable] = None,
-      beta2 : Optional[Iterable] = None,
-      key_size : int = None,
-      key_perm : Optional[Tensor] = None,
-      rehash_factor : float = 2.0,
-      rehash_threshold : float = 0.75,
+      n_buckets,
+      device  = "cuda:0",
+      prime1 = None,
+      prime2 = None,
+      alpha1 = None,
+      alpha2 = None,
+      beta1 = None,
+      beta2 = None,
+      key_size = None,
+      key_perm = None,
+      rehash_factor= 2.0,
+      rehash_threshold = 0.75,
     ):
     self.n_buckets = n_buckets
     self.device = torch.device(device)
@@ -54,8 +52,6 @@ class CudaClosedHashmap:
       # self._unique_subkeys = CudaClosedHashmap(32, device=self.device)
 
     self._hashmap_impl_cuda = None
-
-    self.timer = ProfilingTimer(name="CudaClosedHashmap", enabled=False)
     self.debug = False
 
   @property
@@ -137,7 +133,7 @@ class CudaClosedHashmap:
       assert new.shape == self.key_perm.shape
       self._key_perm = new
 
-  def keys(self) -> Optional[Tensor]:
+  def keys(self):
     if self._keys is None:
       return None
     else:
@@ -145,7 +141,7 @@ class CudaClosedHashmap:
       keys = self._keys.reshape(self._keys.shape[0], -1)[mask][:, self.key_perm]
       return keys
 
-  def values(self) -> Optional[Tensor]:
+  def values(self):
     if self._values is None:
       return None
     else:
@@ -158,7 +154,7 @@ class CudaClosedHashmap:
     masked_values[selectors] = new_values
     self._values[mask] = masked_values
 
-  def permute_keys(self, ordering : tuple[int]):
+  def permute_keys(self, ordering):
     assert self._keys is not None, "hashmap is empty"
     assert len(self.key_shape) == 1, "keys are not one dimensional"
     assert len(ordering) == self.key_shape[0]
@@ -214,25 +210,25 @@ class CudaClosedHashmap:
       new._hashmap_impl_cuda = self._hashmap_impl_cuda
       return new
 
-  def uuid(self) -> Tensor:
+  def uuid(self):
     mask = self._uuid != -1
     return self._uuid[mask]
 
   @property
-  def n_elements(self) -> int:
+  def n_elements(self):
     return self._n_elements.item()
 
   @property
-  def load_factor(self) -> float:
+  def load_factor(self):
     return self.n_elements / self.n_buckets
 
   @property
-  def key_shape(self) -> torch.Size:
+  def key_shape(self):
     assert self._keys is not None
     return self._keys.shape[1:]
   
   @property
-  def value_shape(self) -> torch.Size:
+  def value_shape(self):
     assert self._values is not None
     return self._values.shape[1:]
     
@@ -245,10 +241,10 @@ class CudaClosedHashmap:
       return -(logp * p).sum(dim=-1)
     return entropy(logits).exp() / self.n_buckets
 
-  def __len__(self) -> int:
+  def __len__(self):
     return self.n_elements
 
-  def get_hash(self, keys : Tensor) -> Tensor: #[n_keys, d_key]):
+  def get_hash(self, keys): #[n_keys, d_key]):
     # torch.quantize_per_tensor(torch.randn(1000,8), 0.1, 0, torch.qint32).int_repr().sum(-1) % 10
     n_keys = keys.shape[0]
     keys = keys.reshape(n_keys, -1).clone()
@@ -272,7 +268,7 @@ class CudaClosedHashmap:
       h = ( (self.alpha1[None] * keys + self.beta1[None]) % self.prime1[None] )[:, self._key_perm].prod(dim=-1).abs() % self.n_buckets
     return h
 
-  def get_uuid(self, keys : Tensor) -> Tensor: #[n_keys, d_key]):
+  def get_uuid(self, keys): #[n_keys, d_key]):
     n_keys = keys.shape[0]
     keys = keys.reshape(n_keys, -1).clone()
     if keys.dtype == torch.float:
@@ -291,9 +287,7 @@ class CudaClosedHashmap:
     h = ( (self.alpha2[None] * keys + self.beta2[None]) % self.prime2[None] ).prod(dim=-1).abs()
     return h
 
-  def set(self, new_keys : Tensor, new_values : Tensor):
-    start, stop = self.timer.create_context("set")
-    start("prep")
+  def set(self, new_keys, new_values):
     assert new_keys.shape[0] == new_values.shape[0]
 
     if self._keys is None:
@@ -321,7 +315,6 @@ class CudaClosedHashmap:
 
     if new_keys.shape[0] == 0:
       return
-    stop("prep")
 
     _, is_found = self.hashmap_impl_cuda.get(
       prime1=self.prime1,
@@ -355,17 +348,15 @@ class CudaClosedHashmap:
       all_values=self._values,
       all_uuids=self._uuid
     )
-    # print( self._keys )
-    # print(self._uuid)
-    # print( (self._uuid == -1).sum(), self._uuid.shape)
+
 
     self._n_elements += n_new_elements
 
   def get(
       self,
-      keys : torch.Tensor,
-      fallback_value : Optional[torch.Tensor] = None,
-    ) -> tuple[Tensor, Tensor]:
+      keys,
+      fallback_value = None,
+    ):
     if self._keys is None or self._values is None:
       raise RuntimeError("store something first")
       return None, None
@@ -403,7 +394,6 @@ class CudaClosedHashmap:
     keys = self.keys().contiguous()
     values = self.values().contiguous()
     
-    timer = self.timer
     self.__init__(
       n_buckets=n_buckets,
       device=self.device,
@@ -411,7 +401,6 @@ class CudaClosedHashmap:
       rehash_factor=self._rehash_factor,
       rehash_threshold=self._rehash_threshold,
     )
-    self.timer = timer
     self.set(keys, values)
 
   def __getitem__(self, keys):

@@ -2,7 +2,6 @@ import numpy as np
 import torch
 from datetime import datetime
 from pathlib import Path
-from torch import Tensor
 import math
 import psutil
 from os import path

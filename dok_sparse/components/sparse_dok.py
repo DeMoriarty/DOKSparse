@@ -1,8 +1,6 @@
-from typing import Iterable, Tuple, Union
 import torch
 import numpy as np
 from torch import Tensor
-from torchtimer import ProfilingTimer
 
 from .cuda_closed_hashmap import CudaClosedHashmap
 from ..util import str2dtype, next_power_of_2
@@ -49,10 +47,9 @@ class SparseDOKTensor(object):
         indices.T.to(self.device),
         values.to(device=self.device, dtype=self.dtype)[:, None]
       )
-    self.timer = ProfilingTimer(True, name="DOKSparseTensor")
 
   @classmethod
-  def from_sparse_coo(cls, tensor : Tensor):
+  def from_sparse_coo(cls, tensor):
     assert isinstance(tensor, Tensor)
     assert tensor.layout == torch.sparse_coo
     tensor = tensor.coalesce()
@@ -67,7 +64,7 @@ class SparseDOKTensor(object):
     )
 
   @classmethod
-  def from_dense(cls, tensor : Tensor):
+  def from_dense(cls, tensor):
     assert isinstance(tensor, Tensor)
     assert tensor.layout == torch.strided
     return cls.from_sparse_coo(tensor.to_sparse())
@@ -83,21 +80,21 @@ class SparseDOKTensor(object):
     return func(*args, **kwargs)
     
   @property
-  def is_sparse(self) -> bool:
+  def is_sparse(self):
     return True
 
-  def _is_coalesced(self) -> bool:
+  def _is_coalesced(self):
     return False
 
-  def size(self) -> torch.Size:
+  def size(self):
     return self._size
 
   @property
-  def shape(self) -> torch.Size:
+  def shape(self):
     return self.size()
 
   @property
-  def dtype(self) -> torch.dtype:
+  def dtype(self):
     return self._dtype
 
   def clone(self, deepclone=False):
@@ -111,7 +108,7 @@ class SparseDOKTensor(object):
     new._hashmap = self._hashmap.clone(deepclone=deepclone)
     return new
 
-  def indices(self) -> Tensor:
+  def indices(self):
     # assert self._hashmap.keys() is not None
     indices = self._hashmap.keys()
     if indices is None:
@@ -119,7 +116,7 @@ class SparseDOKTensor(object):
     else:
       return indices.T
 
-  def values(self) -> Tensor:
+  def values(self):
     values = self._hashmap.values()
     if values is None:
       return torch.empty(0, device=self.device, dtype=self.dtype)
@@ -129,28 +126,28 @@ class SparseDOKTensor(object):
   def set_values(self, selectors, new_values):
     self._hashmap.set_values(selectors=selectors, new_values=new_values[:, None])
 
-  def _indices(self) -> Tensor:
+  def _indices(self):
     return self._hashmap._keys
 
-  def _values(self) -> Tensor:
+  def _values(self):
     return self._hashmap._values
   
   @property
-  def ndim(self) -> int:
+  def ndim(self):
     return len(self.shape)
 
-  def _nnz(self) -> int:
+  def _nnz(self):
     return self._hashmap.n_elements
 
   @property
-  def sparsity(self) -> float:
+  def sparsity(self):
     return 1 - self._nnz() / float(np.prod(self.shape))
 
   @property
-  def _as_sparse_coo_tensor(self) -> Tensor:
+  def _as_sparse_coo_tensor(self):
     return self.to_sparse_coo()
 
-  def to_sparse_coo(self) -> Tensor: 
+  def to_sparse_coo(self): 
     t = torch.sparse_coo_tensor(
       indices=self.indices(), 
       values=self.values(),
@@ -161,10 +158,10 @@ class SparseDOKTensor(object):
     t = t.coalesce()
     return t
 
-  def to_sparse_csr(self) -> Tensor:
+  def to_sparse_csr(self):
     self.to_sparse_coo().to_sparse_csr()
 
-  def to_dense(self) -> Tensor:
+  def to_dense(self):
     return self.to_sparse_coo().to_dense()
   
   def resize(self, *new_size):
@@ -176,7 +173,7 @@ class SparseDOKTensor(object):
   def is_coalesced(self):
     return self._is_coalesced
 
-  def _handle_selectors(self, selectors) -> Tensor:
+  def _handle_selectors(self, selectors):
     if isinstance(selectors, (Tensor, slice) ):
       selectors = (selectors, )
 
@@ -247,7 +244,7 @@ class SparseDOKTensor(object):
     selectors = torch.stack(torch.broadcast_tensors(*selectors))
     return selectors
 
-  def __getitem__(self, selectors : Union[Tensor, Tuple[Tensor]]):
+  def __getitem__(self, selectors):
     selectors = self._handle_selectors(selectors)
     values_shape = selectors.shape[1:]
     selectors = selectors.view(self.ndim, -1)
@@ -288,7 +285,7 @@ class SparseDOKTensor(object):
     indices = self.indices[dim]
     return (start <= indices) & (indices < stop)
 
-  def _get_slice(self, slices : Tuple[slice]):
+  def _get_slice(self, slices):
     slices = tuple(slices) + (None,) * (self.ndim - len(slices))
     mask = torch.ones(self.nnz, device=self.device, dtype=torch.bool)
     new_size = []
@@ -322,7 +319,7 @@ class SparseDOKTensor(object):
   def storage(self):
     return self._hashmap
 
-  def normalize(self, dim : int = -1, p : float = 2, eps : float = 1e-12):
+  def normalize(self, dim = -1, p = 2, eps = 1e-12):
     return fs.normalize(
       input=self.to_sparse_coo(),
       dim=dim,
@@ -330,7 +327,7 @@ class SparseDOKTensor(object):
       eps=eps
     )
     
-  def normalize_(self, dim : int = -1, p : float = 2, eps : float = 1e-12):
+  def normalize_(self, dim = -1, p = 2, eps = 1e-12):
     return fs.normalize_(
       input=self.to_sparse_coo(),
       dim=dim,
@@ -356,13 +353,13 @@ class SparseDOKTensor(object):
   def select(self, dim, index):
     return self.to_sparse_coo().select(dim=dim, index=index)
 
-  def permute_(self, *ordering : tuple[int]):
+  def permute_(self, *ordering):
     # self._hashmap.permute_keys(ordering)
     self._hashmap.key_perm = ordering
     self._size = torch.Size(self._size[i] for i in ordering)
     return self
   
-  def permute(self, *ordering : tuple[int]):
+  def permute(self, *ordering):
     new = self.clone()
     # new._hashmap.permute_keys(ordering)
     new._hashmap.key_perm = ordering

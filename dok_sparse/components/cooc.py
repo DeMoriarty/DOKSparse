@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-from typing import List, Tuple, Union
 
 class Coocurrence(nn.Module):
   def __init__(
@@ -52,10 +51,9 @@ class Coocurrence(nn.Module):
 
   def record(
       self,
-      left : Union[torch.LongTensor, int], 
-      right : Union[torch.LongTensor, int], 
-      # increment_by : int = 1
-      increment_by : Union[torch.FloatTensor, float] = 1.0,
+      left, 
+      right, 
+      increment_by = 1.0,
     ):
     if isinstance(left, torch.LongTensor) and isinstance(right, torch.LongTensor):
       assert len(left.shape) == len(right.shape) == 1

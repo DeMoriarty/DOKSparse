@@ -1,10 +1,7 @@
 import torch
-import numpy as np
 import torch.nn.functional as F
-import math
 from typing import Union, Optional
 from torch import Tensor
-# from pykeops.torch import LazyTensor
 
 from .components.cuda.topkspspcsim import TopkSPSPCSIM
 
@@ -234,17 +231,3 @@ def sparse_topk_cos(a : Tensor, b : Tensor, dim=1, k=1):
   a = normalize(a, dim=-1)
   b = normalize(b, dim=-1)
   return topkspsp_inner(a, b, k=k)
-
-# dns = torch.rand(100, 100, device="cuda:0")
-# sparsity = 0.5
-# mask = torch.rand_like(dns) < sparsity
-# dns[mask] = 0
-# sps = dns.to_sparse()
-
-# dim = 1
-# p = 2
-
-# y_sp = normalize(sps, dim=dim, p=p).to_dense()
-# y_dn = F.normalize(dns, dim=dim, p=p)
-# print(y_sp, y_dn)
-# print(torch.allclose(y_sp, y_dn))
