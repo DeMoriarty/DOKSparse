@@ -162,551 +162,6 @@ long long atomicCAS(
   );
   return reinterpret_cast<ll_t&>(old);
 }
-#define VOLATILE 
-
-
-CUDA_DEVICE_INLINE float atomicMax(float *address, float val)
-{
-  int ret = __float_as_int(*address);
-  while(val > __int_as_float(ret))
-  {
-    int old = ret;
-    if((ret = atomicCAS((int *)address, old, __float_as_int(val))) == old)
-        break;
-  }
-  return __int_as_float(ret);
-}
-
-CUDA_DEVICE_INLINE unsigned int bfe(
-  unsigned int source,
-  unsigned int bitIndex
-) {
-  unsigned int bit;
-  asm volatile("bfe.u32 %0, %1, %2, %3;" : "=r"(bit) : "r"((unsigned int) source), "r"(bitIndex), "r"(1));
-  return bit;
-}
-
-CUDA_DEVICE_INLINE void warp_comparator(
-  float &value,
-  int64_t &index,
-  const int stride,
-  const int direction
-){
-  const float otherValue = __shfl_xor_sync(0xFFFFFFFF, value, stride);
-  const int64_t otherIndex = __shfl_xor_sync(0xFFFFFFFF, index, stride);
-  if (value != otherValue){
-    bool condition = value < otherValue == direction;
-    index = condition ? otherIndex : index;
-    value = condition ? otherValue : value;
-  }
-}
-
-template <int TPB>
-CUDA_DEVICE_INLINE void block_comparator(
-  float &value,
-  int64_t &index,
-  const int stride,
-  const int direction,
-  const int laneID,
-  VOLATILE float *valueSmem,
-  VOLATILE int64_t *indexSmem
-){
-  __syncthreads();
-  valueSmem[laneID] = value;
-  indexSmem[laneID] = index;
-  __syncthreads();
-
-  float otherValue = valueSmem[laneID ^ stride];
-  int64_t otherIndex = indexSmem[laneID ^ stride];
-
-  if (value != otherValue){
-    bool condition = value < otherValue == direction;
-    value = condition ? otherValue : value;
-    index = condition ? otherIndex : index;
-  }
-  /*
-  */
-}
-
-CUDA_DEVICE_INLINE void block_comparator_noop(
-){
-  __syncthreads();
-  __syncthreads();
-  __syncthreads();
-  __syncthreads();
-}
-
-CUDA_DEVICE_INLINE void thread_comparator(
-  float &value,
-  int64_t &index,
-  float otherValue,
-  int64_t otherIndex,
-  const int direction
-){
-  bool condition = value > otherValue == direction;
-  if (value != otherValue && condition){
-    value = otherValue;
-    index = otherIndex;
-  }
-}
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort_2(
-  float &value,
-  int64_t &index,
-  int laneID
-){
-  warp_comparator(value, index, 1, bfe(laneID, 1) ^ bfe(laneID, 0));
-}
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort_4(
-  float &value,
-  int64_t &index,
-  int laneID
-){
-  bitonic_sort_2<TPB>(value, index, laneID);
-  warp_comparator(value, index, 2, bfe(laneID, 2) ^ bfe(laneID, 1));
-  warp_comparator(value, index, 1, bfe(laneID, 2) ^ bfe(laneID, 0));
-}
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort_8(
-  float &value,
-  int64_t &index,
-  int laneID
-){
-  bitonic_sort_4<TPB>(value, index, laneID);
-  warp_comparator(value, index, 4, bfe(laneID, 3) ^ bfe(laneID, 2));
-  warp_comparator(value, index, 2, bfe(laneID, 3) ^ bfe(laneID, 1));
-  warp_comparator(value, index, 1, bfe(laneID, 3) ^ bfe(laneID, 0));
-}
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort_16(
-  float &value,
-  int64_t &index,
-  int laneID
-){
-  bitonic_sort_8<TPB>(value, index, laneID);
-  warp_comparator(value, index, 8, bfe(laneID, 4) ^ bfe(laneID, 3));
-  warp_comparator(value, index, 4, bfe(laneID, 4) ^ bfe(laneID, 2));
-  warp_comparator(value, index, 2, bfe(laneID, 4) ^ bfe(laneID, 1));
-  warp_comparator(value, index, 1, bfe(laneID, 4) ^ bfe(laneID, 0));
-}
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort_32(
-  float &value,
-  int64_t &index,
-  int laneID
-){
-  bitonic_sort_16<TPB>(value, index, laneID);
-  warp_comparator(value, index, 16, bfe(laneID, 5) ^ bfe(laneID, 4));
-  warp_comparator(value, index, 8, bfe(laneID, 5) ^ bfe(laneID, 3));
-  warp_comparator(value, index, 4, bfe(laneID, 5) ^ bfe(laneID, 2));
-  warp_comparator(value, index, 2, bfe(laneID, 5) ^ bfe(laneID, 1));
-  warp_comparator(value, index, 1, bfe(laneID, 5) ^ bfe(laneID, 0));
-}
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort_global_2(
-  float &value,
-  int64_t &index,
-  float otherValue,
-  int64_t otherIndex,
-  int laneID
-) {
-  if (TPB - 32 <= threadIdx.x){
-    thread_comparator(value, index, otherValue, otherIndex, 0);
-    warp_comparator(value, index, 1, !bfe(laneID, 0));
-  }
-}
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort_global_4(
-  float &value,
-  int64_t &index,
-  float otherValue,
-  int64_t otherIndex,
-  int laneID
-) {
-  if (TPB - 32 <= threadIdx.x){
-    thread_comparator(value, index, otherValue, otherIndex, 0);
-    warp_comparator(value, index, 2, !bfe(laneID, 1));
-    warp_comparator(value, index, 1, !bfe(laneID, 0));
-  }
-}
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort_global_8(
-  float &value,
-  int64_t &index,
-  float otherValue,
-  int64_t otherIndex,
-  int laneID
-) {
-  if (TPB - 32 <= threadIdx.x){
-    thread_comparator(value, index, otherValue, otherIndex, 0);
-    warp_comparator(value, index, 4, !bfe(laneID, 2));
-    warp_comparator(value, index, 2, !bfe(laneID, 1));
-    warp_comparator(value, index, 1, !bfe(laneID, 0));
-  }
-}
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort_global_16(
-  float &value,
-  int64_t &index,
-  float otherValue,
-  int64_t otherIndex,
-  int laneID
-) {
-  if (TPB - 32 <= threadIdx.x){
-    thread_comparator(value, index, otherValue, otherIndex, 0);
-    warp_comparator(value, index, 8, !bfe(laneID, 3));
-    warp_comparator(value, index, 4, !bfe(laneID, 2));
-    warp_comparator(value, index, 2, !bfe(laneID, 1));
-    warp_comparator(value, index, 1, !bfe(laneID, 0));
-  }
-}
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort_global_32(
-  float &value,
-  int64_t &index,
-  float otherValue,
-  int64_t otherIndex,
-  int laneID
-) {
-  if (TPB - 32 <= threadIdx.x){
-    thread_comparator(value, index, otherValue, otherIndex, 0);
-    warp_comparator(value, index, 16, !bfe(laneID, 4));
-    warp_comparator(value, index, 8, !bfe(laneID, 3));
-    warp_comparator(value, index, 4, !bfe(laneID, 2));
-    warp_comparator(value, index, 2, !bfe(laneID, 1));
-    warp_comparator(value, index, 1, !bfe(laneID, 0));
-  }
-}
-
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort_64(
-  float &value,
-  int64_t &index,
-  VOLATILE float *valueSmem,
-  VOLATILE int64_t *indexSmem,
-  int laneID
-){
-  bitonic_sort_32<TPB>(value, index, laneID);
-  block_comparator<TPB>(value, index, 32, bfe(laneID, 6) ^ bfe(laneID, 5), laneID, valueSmem, indexSmem);
-  warp_comparator(value, index, 16, bfe(laneID, 6) ^ bfe(laneID, 4));
-  warp_comparator(value, index, 8, bfe(laneID, 6) ^ bfe(laneID, 3));
-  warp_comparator(value, index, 4, bfe(laneID, 6) ^ bfe(laneID, 2));
-  warp_comparator(value, index, 2, bfe(laneID, 6) ^ bfe(laneID, 1));
-  warp_comparator(value, index, 1, bfe(laneID, 6) ^ bfe(laneID, 0));
-}
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort_global_64(
-  float &value,
-  int64_t &index,
-  float otherValue,
-  int64_t otherIndex,
-  VOLATILE float *valueSmem,
-  VOLATILE int64_t *indexSmem,
-  int laneID
-) {
-  if (TPB - 64 <= threadIdx.x){
-    thread_comparator(value, index, otherValue, otherIndex, 0);
-    block_comparator<TPB>(value, index, 32, !bfe(laneID, 5), laneID, valueSmem, indexSmem);
-    warp_comparator(value, index, 16, !bfe(laneID, 4));
-    warp_comparator(value, index, 8, !bfe(laneID, 3));
-    warp_comparator(value, index, 4, !bfe(laneID, 2));
-    warp_comparator(value, index, 2, !bfe(laneID, 1));
-
-    warp_comparator(value, index, 1, !bfe(laneID, 0));
-  } else {
-    block_comparator_noop();
-  }
-}
-
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort_128(
-  float &value,
-  int64_t &index,
-  VOLATILE float *valueSmem,
-  VOLATILE int64_t *indexSmem,
-  int laneID
-){
-  bitonic_sort_64<TPB>(value, index, valueSmem, indexSmem, laneID);
-  block_comparator<TPB>(value, index, 64, bfe(laneID, 7) ^ bfe(laneID, 6), laneID, valueSmem, indexSmem);
-  block_comparator<TPB>(value, index, 32, bfe(laneID, 7) ^ bfe(laneID, 5), laneID, valueSmem, indexSmem);
-  warp_comparator(value, index, 16, bfe(laneID, 7) ^ bfe(laneID, 4));
-  warp_comparator(value, index, 8, bfe(laneID, 7) ^ bfe(laneID, 3));
-  warp_comparator(value, index, 4, bfe(laneID, 7) ^ bfe(laneID, 2));
-  warp_comparator(value, index, 2, bfe(laneID, 7) ^ bfe(laneID, 1));
-  warp_comparator(value, index, 1, bfe(laneID, 7) ^ bfe(laneID, 0));
-}
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort_global_128(
-  float &value,
-  int64_t &index,
-  float otherValue,
-  int64_t otherIndex,
-  VOLATILE float *valueSmem,
-  VOLATILE int64_t *indexSmem,
-  int laneID
-) {
-  if (TPB - 128 <= threadIdx.x){
-    thread_comparator(value, index, otherValue, otherIndex, 0);
-    block_comparator<TPB>(value, index, 64, !bfe(laneID, 6), laneID, valueSmem, indexSmem);
-    block_comparator<TPB>(value, index, 32, !bfe(laneID, 5), laneID, valueSmem, indexSmem);
-    warp_comparator(value, index, 16, !bfe(laneID, 4));
-    warp_comparator(value, index, 8, !bfe(laneID, 3));
-    warp_comparator(value, index, 4, !bfe(laneID, 2));
-    warp_comparator(value, index, 2, !bfe(laneID, 1));
-    warp_comparator(value, index, 1, !bfe(laneID, 0));
-  } else {
-    block_comparator_noop();
-    block_comparator_noop();
-  }
-}
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort_256(
-  float &value,
-  int64_t &index,
-  VOLATILE float *valueSmem,
-  VOLATILE int64_t *indexSmem,
-  int laneID
-){
-  bitonic_sort_128<TPB>(value, index, valueSmem, indexSmem, laneID);
-  block_comparator<TPB>(value, index, 128, bfe(laneID, 8) ^ bfe(laneID, 7), laneID, valueSmem, indexSmem);
-  block_comparator<TPB>(value, index, 64, bfe(laneID, 8) ^ bfe(laneID, 6), laneID, valueSmem, indexSmem);
-  block_comparator<TPB>(value, index, 32, bfe(laneID, 8) ^ bfe(laneID, 5), laneID, valueSmem, indexSmem);
-  warp_comparator(value, index, 16, bfe(laneID, 8) ^ bfe(laneID, 4));
-  warp_comparator(value, index, 8, bfe(laneID, 8) ^ bfe(laneID, 3));
-  warp_comparator(value, index, 4, bfe(laneID, 8) ^ bfe(laneID, 2));
-  warp_comparator(value, index, 2, bfe(laneID, 8) ^ bfe(laneID, 1));
-  warp_comparator(value, index, 1, bfe(laneID, 8) ^ bfe(laneID, 0));
-}
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort_global_256(
-  float &value,
-  int64_t &index,
-  float otherValue,
-  int64_t otherIndex,
-  VOLATILE float *valueSmem,
-  VOLATILE int64_t *indexSmem,
-  int laneID
-) {
-  if (TPB - 256 <= threadIdx.x){
-    thread_comparator(value, index, otherValue, otherIndex, 0);
-    block_comparator<TPB>(value, index, 128, !bfe(laneID, 7), laneID, valueSmem, indexSmem);
-    block_comparator<TPB>(value, index, 64, !bfe(laneID, 6), laneID, valueSmem, indexSmem);
-    block_comparator<TPB>(value, index, 32, !bfe(laneID, 5), laneID, valueSmem, indexSmem);
-    warp_comparator(value, index, 16, !bfe(laneID, 4));
-    warp_comparator(value, index, 8, !bfe(laneID, 3));
-    warp_comparator(value, index, 4, !bfe(laneID, 2));
-    warp_comparator(value, index, 2, !bfe(laneID, 1));
-    warp_comparator(value, index, 1, !bfe(laneID, 0));
-  } else {
-    block_comparator_noop();
-    block_comparator_noop();
-    block_comparator_noop();
-  }
-}
-
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort_512(
-  float &value,
-  int64_t &index,
-  VOLATILE float *valueSmem,
-  VOLATILE int64_t *indexSmem,
-  int laneID
-){
-  bitonic_sort_256<TPB>(value, index, valueSmem, indexSmem, laneID);
-  block_comparator<TPB>(value, index, 256, bfe(laneID, 9) ^ bfe(laneID, 8), laneID, valueSmem, indexSmem);
-  block_comparator<TPB>(value, index, 128, bfe(laneID, 9) ^ bfe(laneID, 7), laneID, valueSmem, indexSmem);
-  block_comparator<TPB>(value, index, 64, bfe(laneID, 9) ^ bfe(laneID, 6), laneID, valueSmem, indexSmem);
-  block_comparator<TPB>(value, index, 32, bfe(laneID, 9) ^ bfe(laneID, 5), laneID, valueSmem, indexSmem);
-  warp_comparator(value, index, 16, bfe(laneID, 9) ^ bfe(laneID, 4));
-  warp_comparator(value, index, 8, bfe(laneID, 9) ^ bfe(laneID, 3));
-  warp_comparator(value, index, 4, bfe(laneID, 9) ^ bfe(laneID, 2));
-  warp_comparator(value, index, 2, bfe(laneID, 9) ^ bfe(laneID, 1));
-  warp_comparator(value, index, 1, bfe(laneID, 9) ^ bfe(laneID, 0));
-}
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort_global_512(
-  float &value,
-  int64_t &index,
-  float otherValue,
-  int64_t otherIndex,
-  VOLATILE float *valueSmem,
-  VOLATILE int64_t *indexSmem,
-  int laneID
-) {
-  if (TPB - 512 <= threadIdx.x){
-    thread_comparator(value, index, otherValue, otherIndex, 0);
-    block_comparator<TPB>(value, index, 256, !bfe(laneID, 8), laneID, valueSmem, indexSmem);
-    block_comparator<TPB>(value, index, 128, !bfe(laneID, 7), laneID, valueSmem, indexSmem);
-    block_comparator<TPB>(value, index, 64, !bfe(laneID, 6), laneID, valueSmem, indexSmem);
-    block_comparator<TPB>(value, index, 32, !bfe(laneID, 5), laneID, valueSmem, indexSmem);
-    warp_comparator(value, index, 16, !bfe(laneID, 4));
-    warp_comparator(value, index, 8, !bfe(laneID, 3));
-    warp_comparator(value, index, 4, !bfe(laneID, 2));
-    warp_comparator(value, index, 2, !bfe(laneID, 1));
-    warp_comparator(value, index, 1, !bfe(laneID, 0));
-  } else {
-    block_comparator_noop();
-    block_comparator_noop();
-    block_comparator_noop();
-    block_comparator_noop();
-  }
-}
-
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort_1024(
-  float &value,
-  int64_t &index,
-  VOLATILE float *valueSmem,
-  VOLATILE int64_t *indexSmem,
-  int laneID
-){
-  bitonic_sort_512<TPB>(value, index, valueSmem, indexSmem, laneID);
-  block_comparator<TPB>(value, index, 512, bfe(laneID, 10) ^ bfe(laneID, 9), laneID, valueSmem, indexSmem);
-  block_comparator<TPB>(value, index, 256, bfe(laneID, 10) ^ bfe(laneID, 8), laneID, valueSmem, indexSmem);
-  block_comparator<TPB>(value, index, 128, bfe(laneID, 10) ^ bfe(laneID, 7), laneID, valueSmem, indexSmem);
-  block_comparator<TPB>(value, index, 64, bfe(laneID, 10) ^ bfe(laneID, 6), laneID, valueSmem, indexSmem);
-  block_comparator<TPB>(value, index, 32, bfe(laneID, 10) ^ bfe(laneID, 5), laneID, valueSmem, indexSmem);
-  warp_comparator(value, index, 16, bfe(laneID, 10) ^ bfe(laneID, 4));
-  warp_comparator(value, index, 8, bfe(laneID, 10) ^ bfe(laneID, 3));
-  warp_comparator(value, index, 4, bfe(laneID, 10) ^ bfe(laneID, 2));
-  warp_comparator(value, index, 2, bfe(laneID, 10) ^ bfe(laneID, 1));
-  warp_comparator(value, index, 1, bfe(laneID, 10) ^ bfe(laneID, 0));
-}
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort_global_1024(
-  float &value,
-  int64_t &index,
-  float otherValue,
-  int64_t otherIndex,
-  VOLATILE float *valueSmem,
-  VOLATILE int64_t *indexSmem,
-  int laneID
-) {
-  if (TPB - 1024 <= threadIdx.x){
-    thread_comparator(value, index, otherValue, otherIndex, 0);
-    block_comparator<TPB>(value, index, 512, !bfe(laneID, 9), laneID, valueSmem, indexSmem);
-    block_comparator<TPB>(value, index, 256, !bfe(laneID, 8), laneID, valueSmem, indexSmem);
-    block_comparator<TPB>(value, index, 128, !bfe(laneID, 7), laneID, valueSmem, indexSmem);
-    block_comparator<TPB>(value, index, 64, !bfe(laneID, 6), laneID, valueSmem, indexSmem);
-    block_comparator<TPB>(value, index, 32, !bfe(laneID, 5), laneID, valueSmem, indexSmem);
-    warp_comparator(value, index, 16, !bfe(laneID, 4));
-    warp_comparator(value, index, 8, !bfe(laneID, 3));
-    warp_comparator(value, index, 4, !bfe(laneID, 2));
-    warp_comparator(value, index, 2, !bfe(laneID, 1));
-    warp_comparator(value, index, 1, !bfe(laneID, 0));
-  } else {
-    block_comparator_noop();
-    block_comparator_noop();
-    block_comparator_noop();
-    block_comparator_noop();
-    block_comparator_noop();
-  }
-}
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort(
-  float &value,
-  int64_t &index,
-  VOLATILE float *valueSmem,
-  VOLATILE int64_t *indexSmem,
-  int laneID
-){
-  if (TPB == 2){
-    bitonic_sort_2<TPB>(value, index, laneID);
-
-  } else if (TPB == 4){
-    bitonic_sort_4<TPB>(value, index, laneID);
-
-  } else if (TPB == 8){
-    bitonic_sort_8<TPB>(value, index, laneID);
-    
-  } else if (TPB == 16){
-    bitonic_sort_16<TPB>(value, index, laneID);
-    
-  } else if (TPB == 32){
-    bitonic_sort_32<TPB>(value, index, laneID);
-    
-  } else if (TPB == 64){
-    bitonic_sort_64<TPB>(value, index, valueSmem, indexSmem, laneID);
-    
-  } else if (TPB == 128){
-    bitonic_sort_128<TPB>(value, index, valueSmem, indexSmem, laneID);
-    
-  } else if (TPB == 256){
-    bitonic_sort_256<TPB>(value, index, valueSmem, indexSmem, laneID);
-    
-  } else if (TPB == 512){
-    bitonic_sort_512<TPB>(value, index, valueSmem, indexSmem, laneID);
-    
-  } else if (TPB == 1024){
-    bitonic_sort_1024<TPB>(value, index, valueSmem, indexSmem, laneID);
-    
-  }
-}
-
-template <int TPB>
-CUDA_DEVICE_INLINE void bitonic_sort_global(
-  float &value,
-  int64_t &index,
-  float otherValue,
-  int64_t otherIndex,
-  VOLATILE float *valueSmem,
-  VOLATILE int64_t *indexSmem,
-  int laneID
-){
-  if (TPB == 2){
-    bitonic_sort_global_2<TPB>(value, index, otherValue, otherIndex, laneID);
-
-  } else if (TPB == 4){
-    bitonic_sort_global_4<TPB>(value, index, otherValue, otherIndex, laneID);
-
-  } else if (TPB == 8){
-    bitonic_sort_global_8<TPB>(value, index, otherValue, otherIndex, laneID);
-    
-  } else if (TPB == 16){
-    bitonic_sort_global_16<TPB>(value, index, otherValue, otherIndex, laneID);
-    
-  } else if (TPB == 32){
-    bitonic_sort_global_32<TPB>(value, index, otherValue, otherIndex, laneID);
-    
-  } else if (TPB == 64){
-    bitonic_sort_global_64<TPB>(value, index, otherValue, otherIndex, valueSmem, indexSmem, laneID);
-    
-  } else if (TPB == 128){
-    bitonic_sort_global_128<TPB>(value, index, otherValue, otherIndex, valueSmem, indexSmem, laneID);
-    
-  } else if (TPB == 256){
-    bitonic_sort_global_256<TPB>(value, index, otherValue, otherIndex, valueSmem, indexSmem, laneID);
-    
-  } else if (TPB == 512){
-    bitonic_sort_global_512<TPB>(value, index, otherValue, otherIndex, valueSmem, indexSmem, laneID);
-    
-  } else if (TPB == 1024){
-    bitonic_sort_global_1024<TPB>(value, index, otherValue, otherIndex, valueSmem, indexSmem, laneID);
-    
-  }
-}
 template <
   typename T
 >
@@ -1118,661 +573,897 @@ class SmemTensor4D{
       };
     }
 };
-template <typename T, int StackCap>
-class Stack{
+#define EMPTY 1
+#define FOUND 2
+#define NOT_FOUND 3
+#define STORED 4
+#define NOT_STORED 5
+
+template <
+  typename KeyType,
+  typename ValueType,
+  int KeySize,
+  int ValueSize
+>
+class ClosedHashmap{
   private:
-    int _stackSize = 0;
-    T _stack[StackCap];
+    ll_t _prime1[KeySize];
+    ll_t _prime2[KeySize];
+    ll_t _alpha1[KeySize];
+    ll_t _alpha2[KeySize];
+    ll_t _beta1[KeySize];
+    ll_t _beta2[KeySize];
+    KeyType *_pAllKeys;
+    ValueType *_pAllValues;
+    ll_t *_pAllUUIDs;
+    ll_t _numBuckets;
+    ll_t _emptyMarker;
+    ll_t _removedMarker;
 
   public:
-    CUDA_DEVICE_INLINE
-    Stack(){
-    }
-
-    CUDA_DEVICE_INLINE 
-    bool is_empty(){
-      return _stackSize <= 0;
-    }
+    ll_t keyPerm[KeySize];
 
     CUDA_DEVICE_INLINE
-    bool is_full(){
-      return _stackSize >= StackCap - 1;
-    }
-
-    CUDA_DEVICE_INLINE
-    int size(){
-      return _stackSize;
-    }
-
-    CUDA_DEVICE_INLINE
-    int capacity(){
-      return StackCap;
-    }
-
-    CUDA_DEVICE_INLINE
-    void fill(T item){
+    ClosedHashmap(const ll_t* pPrime1,
+                  const ll_t* pPrime2,
+                  const ll_t* pAlpha1,
+                  const ll_t* pAlpha2,
+                  const ll_t* pBeta1,
+                  const ll_t* pBeta2,
+                  const ll_t* pKeyPerm,
+                  KeyType* pAllKeys,
+                  ValueType* pAllValues,
+                  ll_t* pAllUUIDs,
+                  ll_t numBuckets,
+                  ll_t emptyMarker,
+                  ll_t removedMarker
+                  )
+                  : _pAllKeys(pAllKeys)
+                  , _pAllValues(pAllValues)
+                  , _pAllUUIDs(pAllUUIDs)
+                  , _numBuckets(numBuckets)
+                  , _emptyMarker(emptyMarker)
+                  , _removedMarker(removedMarker)
+    {
       #pragma unroll
-      for (int i=0; i < StackCap; i++){
-        _stack[i] = item;
+      for (int i=0; i < KeySize; i++){
+        keyPerm[i] = pKeyPerm[i];
+        _prime1[i] = pPrime1[keyPerm[i]];
+        _prime2[i] = pPrime2[keyPerm[i]];
+        _alpha1[i] = pAlpha1[keyPerm[i]];
+        _alpha2[i] = pAlpha2[keyPerm[i]];
+        _beta1[i] = pBeta1[keyPerm[i]];
+        _beta2[i] = pBeta2[keyPerm[i]];
       }
     }
 
     CUDA_DEVICE_INLINE
-    void push(T item){
-      if (is_full()){
-        return;
-      } else {
-        #pragma unroll
-        for (int i = StackCap - 1; i >= 1; i--){
-          _stack[i] = _stack[i - 1];
-        }
-        _stack[0] = item;
-        _stackSize ++;
-      }
-    }
-
-    CUDA_DEVICE_INLINE
-    void pop(T &out){
-      if (is_empty()){
-        return;
-      } else {
-        out = _stack[0];
-        #pragma unroll
-        for (int i=0; i<StackCap-1; i++){
-          _stack[i] = _stack[i+1];
-        }
-        _stackSize--;
-      }
-    }
-
-    CUDA_DEVICE_INLINE
-    T pop(){
-      T outItem;
-      if (!is_empty()) {
-        outItem = _stack[0];
-        #pragma unroll
-        for (int i=0; i<StackCap-1; i++){
-          _stack[i] = _stack[i+1];
-        }
-        _stackSize--;
-      }
-      return outItem;
-    }
-
-};
-
-template <typename T>
-CUDA_DEVICE_INLINE
-int binary_search_recursive(T *arr, int left, int right, T value)
-{
-  if (right >= left) {
-    int mid = left + (right - left) / 2;
-
-    // If the element is present at the middle
-    // itself
-    if (arr[mid] == value)
-        return mid;
-
-    // If element is smaller than mid, then
-    // it can only be present in left subarray
-    if (arr[mid] > value)
-        return binary_search_recursive(arr, left, mid - 1, value);
-
-    // Else the element can only be present
-    // in right subarray
-    return binary_search_recursive(arr, mid + 1, right, value);
-  }
-
-  // We reach here when element is not
-  // present in array
-    return -1;
-}
-
-template <typename T>
-CUDA_DEVICE_INLINE
-int binary_search_iterative(T *arr, int size, T value)
-{   
-    int left = 0;
-    int right = size;
-    while (left <= right) {
-        int mid = left + (right - left) / 2;
-        if (arr[mid] == value)
-            return mid;
-        if (arr[mid] < value)
-            left = mid + 1;
-        else
-            right = mid - 1;
-    }
-    return -1;
-}
-
-template <typename T> 
-CUDA_DEVICE_INLINE
-int binary_search_iterative_v2(T* arr, int size, T value)
-{
-  int low = 0;
-  T v = value + 1;
-  while (size > 0) {
-    int half = size / 2;
-    int other_half = size - half;
-    int probe = low + half;
-    int other_low = low + other_half;
-    v = arr[probe];
-    size = half;
-    low = v < value ? other_low : low;
-    if (v == value){
-        return probe;
-    }
-  }
-  return -1;
-}
-
-template <typename T> 
-CUDA_DEVICE_INLINE
-int binary_search_iterative_v3(T* arr, int __size, T value)
-{
-  int low = 0;
-  int index = -1;
-  #pragma unroll
-  for (int size = __size; size > 0; size /= 2){
-    int half = size / 2;
-    int other_half = size - half;
-    int probe = low + half;
-    int other_low = low + other_half;
-    T v = arr[probe];
-    low = v < value ? other_low : low;
-    // if (v == value){
-    //     return probe;
-    // }
-    index = v == value ? probe : index;
-    
-  }
-  return index;
-}
-
-
-
-template <typename T, int BatchSize, int Size> 
-CUDA_DEVICE_INLINE
-void binary_search_iterative_batched(
-  T* arr, // [B, N] 
-  T value,
-  int indices[BatchSize]
-) {
-  #pragma unroll
-  for (int d=0; d<BatchSize; d++){
-    indices[d] = -1;
-  }
-  int low[BatchSize] = { 0 };
-  #pragma unroll
-  for (int size = Size; size > 0; size /= 2){
-    int half = size / 2;
-    int other_half = size - half;
-    #pragma unroll
-    for (int d=0; d<BatchSize; d++){
-      int probe = low[d] + half;
-      int other_low = low[d] + other_half;
-      T v = arr[d * Size + probe];
-      low[d] = v < value ? other_low : low[d];
-      // if (v == value){
-      //     return probe;
-      // }
-      indices[d]= v == value ? probe : indices[d];
-    }
-  } 
-}
-
-template <typename T, int N>
-CUDA_DEVICE_INLINE
-void warp_sum(T &value){
-  if (N == 32){
-    // warp_sum_32(value);
-    // value += __shfl_xor_sync(-1, value, 1);
-    // value += __shfl_xor_sync(-1, value, 2);
-    // value += __shfl_xor_sync(-1, value, 4);
-    // value += __shfl_xor_sync(-1, value, 8);
-    // value += __shfl_xor_sync(-1, value, 16);
-    value += __shfl_xor_sync(0xffffffff, value, 16);
-    value += __shfl_xor_sync(0xffffffff, value, 8);
-    value += __shfl_xor_sync(0xffffffff, value, 4);
-    value += __shfl_xor_sync(0xffffffff, value, 2);
-    value += __shfl_xor_sync(0xffffffff, value, 1);
-
-  } else if (N == 16){
-    value += __shfl_xor_sync(0xffffffff, value, 8);
-    value += __shfl_xor_sync(0xffffffff, value, 4);
-    value += __shfl_xor_sync(0xffffffff, value, 2);
-    value += __shfl_xor_sync(0xffffffff, value, 1);
-
-  } else if (N == 8){
-    value += __shfl_xor_sync(0xffffffff, value, 4);
-    value += __shfl_xor_sync(0xffffffff, value, 2);
-    value += __shfl_xor_sync(0xffffffff, value, 1);
-    
-  } else if (N == 4){
-    value += __shfl_xor_sync(0xffffffff, value, 2);
-    value += __shfl_xor_sync(0xffffffff, value, 1);
-    
-  } else if (N == 2){
-    value += __shfl_xor_sync(0xffffffff, value, 1);
-    
-  }
-}
-
-template <typename T, int N>
-CUDA_DEVICE_INLINE
-void warp_sum(unsigned int mask, T &value){
-  if (N == 32){
-    value += __shfl_xor_sync(mask, value, 16);
-    value += __shfl_xor_sync(mask, value, 8);
-    value += __shfl_xor_sync(mask, value, 4);
-    value += __shfl_xor_sync(mask, value, 2);
-    value += __shfl_xor_sync(mask, value, 1);
-
-  } else if (N == 16){
-    value += __shfl_xor_sync(mask, value, 8);
-    value += __shfl_xor_sync(mask, value, 4);
-    value += __shfl_xor_sync(mask, value, 2);
-    value += __shfl_xor_sync(mask, value, 1);
-
-  } else if (N == 8){
-    value += __shfl_xor_sync(mask, value, 4);
-    value += __shfl_xor_sync(mask, value, 2);
-    value += __shfl_xor_sync(mask, value, 1);
-    
-  } else if (N == 4){
-    value += __shfl_xor_sync(mask, value, 2);
-    value += __shfl_xor_sync(mask, value, 1);
-    
-  } else if (N == 2){
-    value += __shfl_xor_sync(mask, value, 1);
-    
-  }
-}
-
-template <typename T>
-CUDA_DEVICE_INLINE
-void fast_sum(
-    T &value, 
-    const int i, 
-    T regs[6]
-  ){
-  const int wx = threadIdx.x % 32;
-  const unsigned int mask = 0xffffffff;
-  if (i < 32){
-    regs[0] = value;
-    regs[0] += __shfl_xor_sync(mask, regs[0], 16);
-    if ( (wx / 16) == (i % 2) ){
-      regs[1] = regs[0];
-    }
-
-    if ( i % 2 == 1){
-      regs[1] += __shfl_xor_sync(mask, regs[1], 8);
-      if (((wx / 8) % 2) == ((i % 4) / 2) ){
-        regs[2] = regs[1];
-      }
-    }
-
-    if (i % 4 == 3){
-      regs[2] += __shfl_xor_sync(mask, regs[2], 4);
-      if (((wx / 4) % 2) == ((i % 8) / 4) ){
-        regs[3] = regs[2];
-      }
-    }
-
-    if (i % 8 == 7){
-      regs[3] += __shfl_xor_sync(mask, regs[3], 2);
-      if (((wx / 2) % 2) == ((i % 16) / 8) ){
-        regs[4] = regs[3];
-      }
-    }
-
-    if (i % 16 == 15){
-      regs[4] += __shfl_xor_sync(mask, regs[4], 1);
-      if ( (wx % 2) == (i / 16) ){
-        regs[5] = regs[4];
-      }
-    }
-  } else {
-    int srcLane = (wx / 16) + ((wx % 16) / 8) * 2 + ((wx % 8) / 4) * 4 + ((wx % 4) / 2) * 8 + (wx % 2) * 16;
-    value = __shfl_sync(mask, regs[5], srcLane);
-  }
-}
-
-#define SIM_INNER 0
-#define SIM_NL1 1
-#define SIM_NL2 2
-#define SIM_NLP 3
-
-typedef struct {
-  float value;
-  int64_t index;
-} pair;
-
-template <typename T, int n>
-CUDA_DEVICE_INLINE
-void fill_array(T arr[n], T val){
-  #pragma unroll
-  for (int i=0; i<n; i++){
-    arr[i] = val;
-  }
-}
-
-extern "C"
-__global__ void topkspspcsim(
-  const int64_t* __restrict__ pARowStart, // [m + 1]
-  const int64_t* __restrict__ pARowNNZ, // [m + 1]
-  const int64_t* __restrict__ pAColInds,  // [nnz_a]
-  const float* __restrict__ pAVals,       // [nnz_b]
-
-  const int64_t* __restrict__ pBRowStart, // [n]
-  const int64_t* __restrict__ pBRowNNZ, // [n]
-  const int64_t* __restrict__ pBColInds,  // [nnz_b]
-  const float* __restrict__ pBVals,       // [nnz_b]
-
-  int64_t* pTopkInds, //[m, nCands]
-  float* pTopkVals, //[m, nCands]
-
-  int m, int n, int k
-) {
-  constexpr int TPB = _TPB_;   // threads per block
-  constexpr int MaxNNZPR = _MAXNNZPR_; // max number of nonzero elements per row
-  constexpr int StackCap = _STACKCAP_; // stack capacity used for sorting
-  constexpr int TileM = _TILEM_; // number of rows from A matrix
-  constexpr int TileN = TPB; // number of rows from B matrix to load at each iteration
-  
-  constexpr int ThreadsPerGroup = _TPG_; //number of threads per thread group
-  constexpr int NumGroups = TPB / ThreadsPerGroup; //number of thread groups
-  constexpr int GroupTileN = TileN / NumGroups; //number of rows from B matrix per group
-  constexpr int GroupsPerWarp = 32 / ThreadsPerGroup;
-  constexpr unsigned int BaseShflMask = (1 << ThreadsPerGroup) - 1; 
-  constexpr float P = _P_;
-  constexpr int SimType = _SIMTYPE_;
-  
-  int tid = threadIdx.x;
-  int mStart = blockIdx.x * TileM;
-  int gx = tid % ThreadsPerGroup;
-  int gy = tid / ThreadsPerGroup;
-
-  int group_id_in_warp = (tid % 32) / ThreadsPerGroup;
-  unsigned int shflMask = BaseShflMask << (group_id_in_warp * ThreadsPerGroup);
-
-  extern __shared__ int64_t smemPtr[];
-  SmemTensor2D<int64_t, TileM, MaxNNZPR> smemAColInds(smemPtr);
-  SmemTensor2D<float, TileM, MaxNNZPR> smemAVals(smemAColInds.endPtr);
-
-  SmemTensor1D<int64_t, TPB> smemIndexExchange(smemAVals.endPtr);  //[TPB]
-  SmemTensor1D<float, TPB> smemValueExchange(smemIndexExchange.endPtr);  //[TPB]
-  
-  SmemTensor1D<int, TileM> smemSortTrigger(smemValueExchange.endPtr); //[TileM]
-  SmemTensor1D<float, TileM> smemMinValueExchange(smemSortTrigger.endPtr); //[TileM]
-
-  #pragma unroll
-  for (int i=0; i<TileM; i++){
-    smemSortTrigger.set(i, 0);
-  }
-
-  // initialize stack
-  Stack<pair, StackCap> threadTopkStack[TileM];
-  #pragma unroll
-  for (int i=0; i<TileM; i++){
-    pair empty_pair = { -INFINITY, -1 };
-    threadTopkStack[i].fill(empty_pair);
-  }
-  float threadMinValue[TileM];
-  float topkVal[TileM];
-  int64_t topkInd[TileM];
-  fill_array<float, TileM>(threadMinValue, -INFINITY);
-  fill_array<float, TileM>(topkVal, -INFINITY);
-  fill_array<int64_t, TileM>(topkInd, -2);
-
-  // load tile from A
-  #pragma unroll
-  for (int i=0; i < div_ru(TileM, NumGroups); i++){
-    int iMBlock = i * NumGroups + gy;
-    int64_t iM = mStart + iMBlock;
-    if (iM < m && iMBlock < TileM){
-      int64_t aRowStart = pARowStart[iM];
-      int64_t aRowNNZ = pARowNNZ[iM];
+    ll_t get_hash(KeyType key[KeySize]){
+      ll_t hash_code = ( (ll_t) key[0] * _alpha1[0] + _beta1[0]) % _prime1[0];
       #pragma unroll
-      for (int j=0; j < div_ru(MaxNNZPR, ThreadsPerGroup); j++){
-        int64_t iNZA = j * ThreadsPerGroup + gx;
-        if (iNZA < MaxNNZPR){
-          if (iNZA < aRowNNZ){
-            int64_t iK = pAColInds[aRowStart + iNZA];
-            float aVal = pAVals[aRowStart + iNZA];
-            smemAColInds.set(iMBlock, iNZA, iK);
-            smemAVals.set(iMBlock, iNZA, aVal);
+      for (int i=1; i<KeySize; i++){
+        hash_code *= ( (ll_t) key[i] * _alpha1[i] + _beta1[i]) % _prime1[i];
+      }
+      hash_code = llabs(hash_code);
+      return hash_code;
+    }
+
+    CUDA_DEVICE_INLINE
+    ll_t get_uuid(KeyType key[KeySize]){
+      ll_t uuid = ( (ll_t) key[0] * _alpha2[0] + _beta2[0]) % _prime2[0];
+      #pragma unroll
+      for (int i=1; i<KeySize; i++){
+        uuid *= ( (ll_t) key[i] * _alpha2[i] + _beta2[i]) % _prime2[i];
+      }
+      uuid = llabs(uuid);
+      return uuid;
+    }
+
+    CUDA_DEVICE_INLINE
+    bool are_keys_equal(KeyType key1[KeySize], KeyType key2[KeySize]){
+      bool isEqual = key1[0] == key2[0];
+      #pragma unroll
+      for (int i=0; i<KeySize; i++){
+        isEqual = isEqual && (key1[i] == key2[i]);
+      }
+      return isEqual;
+    }
+
+    CUDA_DEVICE_INLINE
+    void get_key(ll_t address, KeyType key[KeySize]){
+      #pragma unroll
+      for (int i=0; i<KeySize; i++){
+        key[i] = _pAllKeys[address * KeySize + i];
+      }
+    }
+
+    CUDA_DEVICE_INLINE
+    void get_key_permuted(ll_t address, KeyType key[KeySize]){
+      #pragma unroll
+      for (int i=0; i<KeySize; i++){
+        key[i] = _pAllKeys[address * KeySize + keyPerm[i]];
+      }
+    }
+
+    CUDA_DEVICE_INLINE
+    void set_key(ll_t address, KeyType key[KeySize]){
+      #pragma unroll
+      for (int i=0; i<KeySize; i++){
+        _pAllKeys[address * KeySize + i] = key[i];
+      }
+    
+    }
+
+    CUDA_DEVICE_INLINE
+    void set_key_permuted(ll_t address, KeyType key[KeySize]){
+      #pragma unroll
+      for (int i=0; i<KeySize; i++){
+        _pAllKeys[address * KeySize + keyPerm[i] ] = key[i];
+      }
+    }
+
+    CUDA_DEVICE_INLINE
+    void get_value(ll_t address, ValueType value[ValueSize]){
+      #pragma unroll
+      for (int i=0; i<ValueSize; i++){
+        value[i] = _pAllValues[address * ValueSize + i];
+      }
+    }
+
+    CUDA_DEVICE_INLINE
+    void set_value(ll_t address, ValueType value[ValueSize]){
+      #pragma unroll
+      for (int i=0; i<ValueSize; i++){
+        _pAllValues[address * ValueSize + i] = value[i];
+      }
+    }
+
+    CUDA_DEVICE_INLINE
+    void get_uuid(ll_t address, ll_t &uuid){
+      uuid = _pAllUUIDs[address];
+    }
+
+    CUDA_DEVICE_INLINE
+    ll_t get_uuid(ll_t address){
+      return _pAllUUIDs[address];
+    }
+
+    CUDA_DEVICE_INLINE
+    void set_uuid(ll_t address, ll_t uuid){
+      _pAllUUIDs[address] = uuid;
+    }
+
+    CUDA_DEVICE_INLINE
+    bool set_uuid_if_empty(int address, ll_t uuid, ll_t &oldUUID){
+      ll_t *ptr = &_pAllUUIDs[address];
+      // if the value at `ptr` is equal to `_emptyMarker`, then set the value of that pointer to `uuid`, return true
+      // else, return false
+      oldUUID = atomicCAS(ptr, _emptyMarker, uuid);
+      if ( oldUUID != _emptyMarker){
+        return false;
+      }
+      return true;
+    }
+
+    CUDA_DEVICE_INLINE
+    bool set_uuid_if_removed(int address, ll_t uuid, ll_t &oldUUID){
+      ll_t *ptr = &_pAllUUIDs[address];
+      // if the value at `ptr` is equal to `_removedMarker`, then set the value of that pointer to `uuid`, return true
+      // else, return false
+      oldUUID = atomicCAS(ptr, _removedMarker, uuid);
+      if ( oldUUID != _removedMarker){
+        return false;
+      }
+      return true;
+    }
+
+    CUDA_DEVICE_INLINE
+    int get_by_uuid(ll_t address, ll_t uuid, ValueType value[ValueSize]){
+      ll_t candidateUUID = get_uuid(address);
+      // check if the candidateKey is emptyKey
+      bool isEmpty = candidateUUID == _emptyMarker;
+      // is so, return not found
+      if (isEmpty){
+        return EMPTY;
+      }
+      // check if the candidateKey is equal to key
+      bool isFound = candidateUUID == uuid;
+      // if so, return found
+      if (isFound){
+        get_value(address, value);
+        return FOUND;
+      }
+      return NOT_FOUND;
+    }
+
+     CUDA_DEVICE_INLINE
+    int set_by_uuid(int address, ll_t uuid, KeyType key[KeySize], ValueType value[ValueSize]){
+      // is so, store key and value in this address
+      // set key to that address, if storing failed (because of another thread using that address ), return not stored
+      ll_t candidateUUID;
+      bool isSuccessful = set_uuid_if_empty(address, uuid, candidateUUID);
+      if (isSuccessful){
+        set_key(address, key);
+        set_value(address, value);
+        return STORED;
+      }
+      // check if the candidateUUID is equal to uuid
+      bool isFound = uuid == candidateUUID;
+      // if so, return stored
+      if (isFound){
+        set_key(address, key);
+        set_value(address, value);
+        return STORED;
+      }
+      // otherwise, return not found
+      return NOT_STORED;
+    }
+
+    CUDA_DEVICE_INLINE
+    bool get(
+      KeyType key[KeySize],
+      ValueType value[ValueSize],
+      ValueType fallbackValue[ValueSize]
+    ){
+      // permute_key(key);
+      ll_t hashCode = get_hash(key);
+      ll_t uuid = get_uuid(key);
+      #pragma unroll 2
+      for (ll_t i=0; i < _numBuckets; i++){
+        ll_t address = (hashCode + i) % _numBuckets;
+        ll_t candidateUUID = get_uuid(address);
+        // check if the candidateKey is emptyKey
+        bool isEmpty = candidateUUID == _emptyMarker;
+        // is so, return not found
+        if (isEmpty){
+          break;
+        }
+        // check if the candidateKey is equal to key
+        bool isFound = candidateUUID == uuid;
+        // if so, return found
+        if (isFound){
+          get_value(address, value);
+          return true;
+        }
+      }
+      #pragma unroll
+      for (int j=0; j<ValueSize; j++){
+        value[j] = fallbackValue[j];
+      }
+      return false;
+    }
+
+    CUDA_DEVICE_INLINE
+    bool set(
+      KeyType key[KeySize],
+      ValueType value[ValueSize]
+    ){
+      // permute_key(key);
+      ll_t hashCode = get_hash(key);
+      ll_t uuid = get_uuid(key);
+      ll_t firstRemovedAddress = -1;
+      #pragma unroll 2
+      for (ll_t i=0; i<_numBuckets; i++){
+        ll_t address = (hashCode + i) % _numBuckets;
+        ll_t candidateUUID;
+        candidateUUID = get_uuid(address);
+        bool isFound = candidateUUID == uuid;
+        // if key is found, return stored
+        if (isFound){
+          set_key_permuted(address, key);
+          set_value(address, value);
+          return true;
+        }
+
+        bool isRemoved = candidateUUID == _removedMarker;
+        if (isRemoved && firstRemovedAddress == -1){
+          firstRemovedAddress = address;
+        }
+
+        bool isEmpty = candidateUUID == _emptyMarker;
+        if (isEmpty){
+          // if no deletedMarker encountered previously, store key-value pair to nearest empty address.
+          if (firstRemovedAddress == -1){
+            bool isSuccessful = set_uuid_if_empty(address, uuid, candidateUUID);
+            if (isSuccessful){
+              set_key_permuted(address, key);
+              set_value(address, value);
+              return true;
+            }
           } else {
-            smemAColInds.set(iMBlock, iNZA, 9999999);
-            smemAVals.set(iMBlock, iNZA, 0.f);
-          }
-        }
-      }
-    }
-  }
-
-  __syncthreads();
-  int64_t nextBRowStart = 0;
-  int64_t nextBRowNNZ = 0;
-  if (tid < n){
-    nextBRowStart = pBRowStart[tid];
-    nextBRowNNZ = pBRowNNZ[tid];
-  }
-  
-  for (int a = 0; a < div_ru(n, TPB); a++){
-    float accumulator[TileM]; // (TPB, TileM)
-    fill_array<float, TileM>(accumulator, 0.f);
-    int64_t iN = a * TPB + tid;
-
-    int64_t bRowStart = nextBRowStart;
-    int64_t bRowNNZ = nextBRowNNZ;
-    if (a < div_ru(n, TPB) - 1){
-      int64_t nextIN = (a+1) * TPB + tid;
-      nextBRowStart = 0;
-      nextBRowNNZ = 0;
-      if (nextIN < n){
-        nextBRowStart = pBRowStart[nextIN];
-        nextBRowNNZ = pBRowNNZ[nextIN];
-      }
-    }
-    int64_t curBRowStart = __shfl_sync(shflMask, bRowStart, 0, ThreadsPerGroup);
-    int64_t curBRowNNZ = __shfl_sync(shflMask, bRowNNZ, 0, ThreadsPerGroup);
-    int64_t nextIKB = -1;
-    int64_t nextINZB = gx;
-    float nextBVal = 0.f;
-    if (nextINZB < curBRowNNZ){
-      nextIKB = pBColInds[curBRowStart + nextINZB];
-      nextBVal = pBVals[curBRowStart + nextINZB];
-    }
-    float regs[TileM][6];
-
-    // TODO: don't know if this is necessary
-    // #pragma unroll
-    // for (int d = 0; d < TileM; d++){
-    //   #pragma unroll
-    //   for (int e = 0; e < 6; e++){
-    //     regs[d][e] = 0.f;
-    //   }
-    // }
-
-    #pragma unroll
-    for (int b = 0; b < ThreadsPerGroup; b++){
-      int loadItrs = div_ru(curBRowNNZ, ThreadsPerGroup);
-      float cVals[TileM];
-      fill_array<float, TileM>(cVals, 0.f);
-      for (int c = 0; c < loadItrs; c++){
-        volatile int64_t iKB = nextIKB;
-        volatile float bVal = nextBVal;
-
-        if (c < loadItrs - 1){
-          nextINZB = (c+1) * ThreadsPerGroup + gx;
-          nextIKB = -1;
-          nextBVal = 0.f;
-          if (nextINZB < curBRowNNZ){
-            nextIKB = pBColInds[curBRowStart + nextINZB];
-            nextBVal = pBVals[curBRowStart + nextINZB];
-          }
-        } else if (b < ThreadsPerGroup - 1) {
-          curBRowStart = __shfl_sync(shflMask, bRowStart, b+1, ThreadsPerGroup);
-          curBRowNNZ = __shfl_sync(shflMask, bRowNNZ, b+1, ThreadsPerGroup);
-          nextINZB = gx;
-          nextIKB = -1;
-          nextBVal = 0.f;
-          if (nextINZB < curBRowNNZ){
-            nextIKB = pBColInds[curBRowStart + nextINZB];
-            nextBVal = pBVals[curBRowStart + nextINZB];
-          }
-        }
-        #pragma unroll
-        for (int d = 0; d < TileM; d++){
-          int64_t iM = mStart + d;
-          int iNZA;
-          #if (_BINSEARCHVER_ == 0)
-            iNZA = binary_search_recursive<int64_t>(smemAColInds.get_child(d).startPtr, 0, MaxNNZPR, iKB);
-          #elif (_BINSEARCHVER_ == 1)
-            iNZA = binary_search_iterative<int64_t>(smemAColInds.get_child(d).startPtr, MaxNNZPR, iKB);
-          #elif (_BINSEARCHVER_ == 2)
-            iNZA = binary_search_iterative_v2<int64_t>(smemAColInds.get_child(d).startPtr, MaxNNZPR, iKB);
-          #elif (_BINSEARCHVER_ == 3)
-            iNZA = binary_search_iterative_v3<int64_t>(smemAColInds.get_child(d).startPtr, MaxNNZPR, iKB);
-          #endif
-
-          float aVal = iNZA == -1 ? 0.f : smemAVals.get(d, iNZA);
-          if (SimType == SIM_INNER){
-            cVals[d] += aVal * bVal;
-
-          } else if (SimType == SIM_NL1){
-            cVals[d] += fabsf(aVal - bVal);
-
-          } else if (SimType == SIM_NL2){
-            float dif = aVal - bVal;
-            cVals[d] += dif * dif;
-          
-          } else if (SimType == SIM_NLP){
-            float dif = aVal - bVal;
-            if (P == 0.f){
-              cVals[d] += dif == 0.f ? 0.f : 1.f;
+          // otherwise, try to store key-value pair to that deletedMarker, if fail, store to nearest empty address.
+            bool isSuccessful = set_uuid_if_removed(firstRemovedAddress, uuid, candidateUUID);
+            if (isSuccessful){
+              set_key_permuted(firstRemovedAddress, key);
+              set_value(firstRemovedAddress, value);
+              return true;
             } else {
-              // if (P % 2.f == 1.f){
-              //   dif = fabsf(dif);
-              // }
-              dif = fabsf(dif);
-              cVals[d] += powf(dif, P);
+              firstRemovedAddress = -1;
+              i--;
             }
           }
         }
       }
+      return false;
+    }
+
+    CUDA_DEVICE_INLINE
+    bool set_old(
+      KeyType key[KeySize],
+      ValueType value[ValueSize]
+    ){
+      // permute_key(key);
+      ll_t hashCode = get_hash(key);
+      ll_t uuid = get_uuid(key);
+      #pragma unroll 2
+      for (ll_t i=0; i<_numBuckets; i++){
+        ll_t address = (hashCode + i) % _numBuckets;
+        ll_t candidateUUID;
+        bool isSuccessful = set_uuid_if_empty(address, uuid, candidateUUID);
+        if (isSuccessful){
+          set_key_permuted(address, key);
+          set_value(address, value);
+          return true;
+        }
+        // check if the candidateUUID is equal to uuid
+        bool isFound = uuid == candidateUUID;
+        // if so, return stored
+        if (isFound){
+          set_key_permuted(address, key);
+          set_value(address, value);
+          return true;
+        }
+      }
+      return false;
+    }
+
+    CUDA_DEVICE_INLINE
+    bool remove(
+      KeyType key[KeySize]
+    ){
+      ll_t hashCode = get_hash(key);
+      ll_t uuid = get_uuid(key);
+      #pragma unroll 2
+      for (ll_t i=0; i < _numBuckets; i++){
+        ll_t address = (hashCode + i) % _numBuckets;
+        ll_t candidateUUID = get_uuid(address);
+        // check if the candidateKey is emptyKey
+        bool isEmpty = candidateUUID == _emptyMarker;
+        // is so, return not found
+        if (isEmpty){
+          break;
+        }
+        // check if the candidateKey is equal to key
+        bool isFound = candidateUUID == uuid;
+        // if so, return found
+        if (isFound){
+          set_uuid(address, _removedMarker);
+          return true;
+        }
+      }
+      return false;
+    }
+
+    template <int BatchSize>
+    CUDA_DEVICE_INLINE
+    void get_batched(
+      KeyType key[BatchSize][KeySize],
+      ValueType value[BatchSize][ValueSize],
+      ValueType fallbackValue[ValueSize],
+      bool isFound[BatchSize]
+    ){
+      ll_t hashCode[BatchSize];
+      ll_t uuid[BatchSize];
+      bool isDone[BatchSize];
+      ll_t address[BatchSize];
       #pragma unroll
-      for (int d=0; d<TileM; d++){
-        // fast_sum<float>(cVals[d], b, regs[d]);
-        warp_sum<float, ThreadsPerGroup>(shflMask, cVals[d]);
-        if (gx == b){
-          accumulator[d] = cVals[d];
+      for (int b = 0; b < BatchSize; b++){
+        hashCode[b] = get_hash(key[b]);
+        uuid[b] = get_uuid(key[b]);
+        isDone[b] = false;
+        isFound[b] = false;
+      }
+      #pragma unroll 2
+      for (ll_t i=0; i < _numBuckets; i++){
+        ll_t candidateUUID[BatchSize];
+        #pragma unroll
+        for (int b = 0; b < BatchSize; b++){
+          address[b] = (hashCode[b] + i) % _numBuckets;
+          candidateUUID[b] = get_uuid(address[b]);
+        }
+        #pragma unroll
+        for (int b = 0; b < BatchSize; b++){
+          // check if the candidateKey is emptyKey
+          bool isEmpty = candidateUUID[b] == _emptyMarker;
+          // is so, return not found
+          if (isEmpty){
+            isDone[b] = true;
+          }
+          // check if the candidateKey is equal to key
+          isFound[b] = candidateUUID[b] == uuid[b];
+          // if so, return found
+          if (isFound[b]){
+            get_value(address[b], value[b]);
+            // return true;
+            isDone[b] = true;
+          }
+        }
+        bool isAllDone = isDone[0];
+        #pragma unroll
+        for (int b=1; b < BatchSize; b++){
+          isAllDone = isAllDone && isDone[b];
+        }
+        if (isAllDone){
+          break;
+        }
+      }
+      #pragma unroll
+      for (int b=0; b<BatchSize; b++){
+        if (!isFound[b]){
+          #pragma unroll
+          for (int j=0; j<ValueSize; j++){
+            value[b][j] = fallbackValue[j];
+          }
         }
       }
     }
-    // #pragma unroll
-    // for (int d=0; d<TileM; d++){
-    //   fast_sum<float>(accumulator[d], ThreadsPerGroup, regs[d]);
+
+    template <int BatchSize>
+    CUDA_DEVICE_INLINE
+    void set_batched(
+      KeyType key[BatchSize][KeySize],
+      ValueType value[BatchSize][ValueSize],
+      bool isStored[BatchSize]
+    ){
+      ll_t hashCode[BatchSize];
+      ll_t uuid[BatchSize];
+      bool isDone[BatchSize];
+      #pragma unroll
+      for (int b=0; b<BatchSize; b++){
+        hashCode[b] = get_hash(key[b]);
+        uuid[b] = get_uuid(key[b]);
+        isDone[b] = false;
+        isStored[b] = false;
+      }
+
+      #pragma unroll 2
+      for (ll_t i=0; i<_numBuckets; i++){
+        ll_t address[BatchSize];
+        ll_t candidateUUID[BatchSize];
+        bool isSuccessful[BatchSize];
+        #pragma unroll
+        for (int b=0; b<BatchSize; b++){
+          address[b] = (hashCode[b] + i) % _numBuckets;
+          isSuccessful[b] = set_uuid_if_empty(address[b], uuid[b], candidateUUID[b]);
+        }
+
+        #pragma unroll
+        for (int b=0; b<BatchSize; b++){
+          isStored[b] = isSuccessful[b] || (uuid[b] == candidateUUID[b]);
+          if (isStored[b]){
+            set_key(address[b], key[b]);
+            set_value(address[b], value[b]);
+            isDone[b] = true;
+          }
+        }
+
+        bool isAllDone = isDone[0];
+        #pragma unroll
+        for (int b=1; b<BatchSize; b++){
+          isAllDone = isAllDone && isDone[b];
+        }
+        if (isAllDone){
+          break;
+        }
+      }
+    }
+
+    // CUDA_DEVICE_INLINE
+    // void permute_key(KeyType key[KeySize]){
+    //   KeyType permutedKey[KeySize];
+    //   #pragma unroll
+    //   for (int i=0; i<KeySize; i++){
+    //     permutedKey[i] = key[keyPerm[i]];
+    //   }
+    //   #pragma unroll
+    //   for (int i=0; i<KeySize; i++){
+    //     key[i] = permutedKey[i];
+    //   }
     // }
+};
 
 
-    // push index value pair into stack
-    __syncthreads();
-    pair oldPairs[TileM];
-    #pragma unroll
-    for (int i = 0; i < TileM; i++){
-      oldPairs[i] = { -INFINITY, -3 };
-      if (threadTopkStack[i].is_full()){
-        threadTopkStack[i].pop(oldPairs[i]);
-        if (oldPairs[i].value > threadMinValue[i]){
-          smemSortTrigger.set(i, 1);
-        }
-      }
+using KeyType = _KEYTYPE_;
+using ValueType = _VALUETYPE_;
+using BoolType = uint8_t;
 
-      pair newPair;
-      if (iN < n){
-        newPair = { accumulator[i],  iN};
-      } else {
-        newPair = { -INFINITY, -4 };
-      }
-      
-      if (accumulator[i] > threadMinValue[i]){
-        threadTopkStack[i].push(newPair);
-      }
-    }
-    __syncthreads();
+extern "C"
+__global__ void closed_hashmap_get(
+  const ll_t* __restrict__ pPrime1, //[KeySize]
+  const ll_t* __restrict__ pPrime2, //[KeySize]
+  const ll_t* __restrict__ pAlpha1, //[KeySize]
+  const ll_t* __restrict__ pAlpha2, //[KeySize]
+  const ll_t* __restrict__ pBeta1,  //[KeySize]
+  const ll_t* __restrict__ pBeta2,  //[KeySize]
+  const ll_t* __restrict__ pKeyPerm,             //[KeySize]
+  const KeyType* __restrict__ pKeys,             //[NumKeys, KeySize]
+  ValueType* pValues,         //[NumKeys, ValueSize]
+  KeyType* pAllKeys,          //[NumBuckets, KeySize]
+  ValueType* pAllValues,      //[NumBuckets, ValueSize]
+  ll_t* pAllUUIDs,            //[NumBuckets]
+  const ValueType* __restrict__ pFallbackValue,  //[ValueSize]  
+  BoolType* pIsFound,        //[NumKeys]
+  ll_t numKeys, ll_t numBuckets
+){
+  constexpr int TPB = _TPB_;
+  constexpr int KPT = _KPT_;
+  constexpr int KeySize = _KEYSIZE_;
+  constexpr int ValueSize = _VALUESIZE_;
+  constexpr int KPB = TPB * KPT;
 
-    // sort if necessary
-    #pragma unroll
-    for (int i=0; i<TileM; i++){
-      if (smemSortTrigger.get(i) > 0){
-        __syncthreads();
-        bitonic_sort<TPB>(oldPairs[i].value, oldPairs[i].index, 
-                          smemValueExchange.startPtr, smemIndexExchange.startPtr, 
-                          tid);
+  int tid = threadIdx.x;
+  ll_t kStart = blockIdx.x * KPB;
 
-        bitonic_sort_global<TPB>(topkVal[i], topkInd[i], 
-                                oldPairs[i].value, oldPairs[i].index, 
-                                smemValueExchange.startPtr, smemIndexExchange.startPtr,
-                                tid);
-        __syncthreads();
-        if (tid == TPB - 1){
-          smemMinValueExchange.set(i, topkVal[i]);
-        }
-        __syncthreads();
-        threadMinValue[i] = smemMinValueExchange.get(i);
-      }
-    }
-    __syncthreads();
-  }
-  // sort the remaining items in stack
+  ClosedHashmap<KeyType, ValueType, KeySize, ValueSize> hashmap(
+    pPrime1, pPrime2,
+    pAlpha1, pAlpha2,
+    pBeta1,  pBeta2,
+    pKeyPerm,
+    pAllKeys,
+    pAllValues,
+    pAllUUIDs,
+    numBuckets,
+    -1,
+    -3
+  );
+
+  // Load keys
+  KeyType keys[KPT][KeySize];
+  ValueType values[KPT][ValueSize];
+  ValueType fallbackValue[ValueSize];
   #pragma unroll
-  for (int i=0; i<TileM; i++){
-    smemSortTrigger.set(i, 0);
-    __syncthreads();
-
-    #pragma unroll
-    for (int j=0; j<StackCap; j++){
-      pair oldPair = { -INFINITY, -5 };
-      if (!threadTopkStack[i].is_empty()){
-         threadTopkStack[i].pop(oldPair);
-         if (oldPair.value > threadMinValue[i]){
-           smemSortTrigger.set(i, 1);
-         }
+  for (int i=0; i<KPT; i++){
+    ll_t offset = kStart + i * TPB + tid;
+    if (offset < numKeys){
+      #pragma unroll
+      for (int j=0; j<KeySize; j++){
+        keys[i][j] = pKeys[offset * KeySize + j];
+        // keys[i][j] = pKeys[offset * KeySize + hashmap.keyPerm[j]];
       }
-      __syncthreads();
-
-      if (smemSortTrigger.get(i) > 0){
-        __syncthreads();
-        bitonic_sort<TPB>(oldPair.value, oldPair.index, 
-                          smemValueExchange.startPtr, smemIndexExchange.startPtr, 
-                          tid);
-
-        bitonic_sort_global<TPB>(topkVal[i], topkInd[i], 
-                                oldPair.value, oldPair.index, 
-                                smemValueExchange.startPtr, smemIndexExchange.startPtr,
-                                tid);
-        __syncthreads();
-        smemSortTrigger.set(i, 0);
-        if (tid == TPB - 1){
-          smemMinValueExchange.set(i, topkVal[i]);
-        }
-        __syncthreads();
-        threadMinValue[i] = smemMinValueExchange.get(i);
-      }
-      __syncthreads();
     }
   }
-
-  // write results back
+  
   #pragma unroll
-  for (int i=0; i<TileM; i++){
-    int iM = mStart + i;
-    if (iM >= m) continue;
-    int candIndex = tid;
-    pTopkVals[iM * TPB + candIndex] = topkVal[i];
-    pTopkInds[iM * TPB + candIndex] = topkInd[i];
+  for (int i=0; i<ValueSize; i++){
+    fallbackValue[i] = pFallbackValue[i];
+  }
+
+  // get values
+  bool isFound[KPT];
+  // hashmap.get_batched<KPT>(keys, values, fallbackValue, isFound);
+  #pragma unroll
+  for (int i=0; i<KPT; i++){
+    int offset = kStart + i * TPB + tid;
+    if (offset < numKeys){
+      isFound[i] = hashmap.get(keys[i], values[i], fallbackValue);
+
+      pIsFound[offset] = (BoolType) isFound[i];
+      if (isFound[i]){
+        #pragma unroll
+        for (int j=0; j<ValueSize; j++){
+          pValues[offset * ValueSize + j] = values[i][j];
+        }
+      }
+    }
   }
 }
+
+extern "C"
+__global__ void closed_hashmap_set(
+  const ll_t* __restrict__ pPrime1, //[KeySize]
+  const ll_t* __restrict__ pPrime2, //[KeySize]
+  const ll_t* __restrict__ pAlpha1, //[KeySize]
+  const ll_t* __restrict__ pAlpha2, //[KeySize]
+  const ll_t* __restrict__ pBeta1,  //[KeySize]
+  const ll_t* __restrict__ pBeta2,  //[KeySize]
+  const ll_t* __restrict__ pKeyPerm,             //[KeySize]
+  const KeyType* __restrict__ pKeys,             //[NumKeys, KeySize]
+  const ValueType* __restrict__ pValues,         //[NumKeys, ValueSize]
+  KeyType* pAllKeys,          //[NumBuckets, KeySize]
+  ValueType* pAllValues,      //[NumBuckets, ValueSize]
+  ll_t* pAllUUIDs,            //[NumBuckets]
+  BoolType* pIsStored,        //[NumKeys]
+  ll_t numKeys, ll_t numBuckets
+){
+  constexpr int TPB = _TPB_;
+  constexpr int KPT = _KPT_;
+  constexpr int KeySize = _KEYSIZE_;
+  constexpr int ValueSize = _VALUESIZE_;
+  constexpr int KPB = TPB * KPT;
+
+  int tid = threadIdx.x;
+  ll_t kStart = blockIdx.x * KPB;
+
+  ClosedHashmap<KeyType, ValueType, KeySize, ValueSize> hashmap(
+    pPrime1, pPrime2,
+    pAlpha1, pAlpha2,
+    pBeta1,  pBeta2,
+    pKeyPerm,
+    pAllKeys,
+    pAllValues,
+    pAllUUIDs,
+    numBuckets,
+    -1,
+    -3
+  );
+
+  // Load keys
+  KeyType keys[KPT][KeySize];
+  ValueType values[KPT][ValueSize];
+  #pragma unroll
+  for (int i=0; i<KPT; i++){
+    ll_t offset = kStart + i * TPB + tid;
+    if (offset < numKeys){
+      #pragma unroll
+      for (int j=0; j<KeySize; j++){
+        keys[i][j] = pKeys[offset * KeySize + j];      
+      }
+      #pragma unroll
+      for (int j=0; j<ValueSize; j++){
+        values[i][j] = pValues[offset * ValueSize + j];
+      }
+    }
+  }
+
+  // get values
+  bool isStored[KPT];
+  // hashmap.set_batched<KPT>(keys, values, isStored);
+
+  #pragma unroll
+  for (int i=0; i<KPT; i++){
+    int offset = kStart + i * TPB + tid;
+    if (offset < numKeys){
+      isStored[i] = hashmap.set(keys[i], values[i]);
+      pIsStored[offset] = (BoolType) isStored[i];
+    }
+  }
+}
+
+extern "C"
+__global__ void closed_hashmap_remove(
+  const ll_t* __restrict__ pPrime1, //[KeySize]
+  const ll_t* __restrict__ pPrime2, //[KeySize]
+  const ll_t* __restrict__ pAlpha1, //[KeySize]
+  const ll_t* __restrict__ pAlpha2, //[KeySize]
+  const ll_t* __restrict__ pBeta1,  //[KeySize]
+  const ll_t* __restrict__ pBeta2,  //[KeySize]
+  const ll_t* __restrict__ pKeyPerm,             //[KeySize]
+  const KeyType* __restrict__ pKeys,             //[NumKeys, KeySize]
+  KeyType* pAllKeys,          //[NumBuckets, KeySize]
+  ValueType* pAllValues,      //[NumBuckets, ValueSize]
+  ll_t* pAllUUIDs,            //[NumBuckets]
+  BoolType* pIsRemoved,        //[NumKeys]
+  ll_t numKeys, ll_t numBuckets
+){
+  constexpr int TPB = _TPB_;
+  constexpr int KPT = _KPT_;
+  constexpr int KeySize = _KEYSIZE_;
+  constexpr int ValueSize = _VALUESIZE_;
+  constexpr int KPB = TPB * KPT;
+
+  int tid = threadIdx.x;
+  ll_t kStart = blockIdx.x * KPB;
+
+  ClosedHashmap<KeyType, ValueType, KeySize, ValueSize> hashmap(
+    pPrime1, pPrime2,
+    pAlpha1, pAlpha2,
+    pBeta1,  pBeta2,
+    pKeyPerm,
+    pAllKeys,
+    pAllValues,
+    pAllUUIDs,
+    numBuckets,
+    -1,
+    -3
+  );
+
+  // Load keys
+  KeyType keys[KPT][KeySize];
+  #pragma unroll
+  for (int i=0; i<KPT; i++){
+    ll_t offset = kStart + i * TPB + tid;
+    if (offset < numKeys){
+      #pragma unroll
+      for (int j=0; j<KeySize; j++){
+        keys[i][j] = pKeys[offset * KeySize + j];
+        // keys[i][j] = pKeys[offset * KeySize + hashmap.keyPerm[j]];
+      }
+    }
+  }
+  
+  // remove
+  bool isRemoved[KPT];
+  #pragma unroll
+  for (int i=0; i<KPT; i++){
+    int offset = kStart + i * TPB + tid;
+    if (offset < numKeys){
+      isRemoved[i] = hashmap.remove(keys[i]);
+      pIsRemoved[offset] = (BoolType) isRemoved[i];
+    }
+  }
+}
+
+// extern "C"
+// __global__ void closed_hashmap_count_existing(
+//   const ll_t* __restrict__ pPrime1, //[KeySize]
+//   const ll_t* __restrict__ pPrime2, //[KeySize]
+//   const ll_t* __restrict__ pAlpha1, //[KeySize]
+//   const ll_t* __restrict__ pAlpha2, //[KeySize]
+//   const ll_t* __restrict__ pBeta1,  //[KeySize]
+//   const ll_t* __restrict__ pBeta2,  //[KeySize]
+//   const KeyType* __restrict__ pKeys,             //[NumKeys, KeySize]
+//   KeyType* pAllKeys,          //[NumBuckets, KeySize]
+//   ValueType* pAllValues,      //[NumBuckets, ValueSize]
+//   ll_t* pAllUUIDs,            //[NumBuckets]
+//   ull_t* __restrict__ pCounts, //[1]
+//   ll_t numKeys, ll_t numBuckets
+// ){
+//   constexpr int TPB = _TPB_;
+//   constexpr int KPT = _KPT_;
+//   constexpr int KeySize = _KEYSIZE_;
+//   constexpr int ValueSize = _VALUESIZE_;
+//   constexpr int KPB = TPB * KPT;
+
+//   int tid = threadIdx.x;
+//   ll_t kStart = blockIdx.x * KPB;
+
+//   ClosedHashmap<KeyType, ValueType, KeySize, ValueSize> hashmap(
+//     pPrime1, pPrime2,
+//     pAlpha1, pAlpha2,
+//     pBeta1,  pBeta2,
+//     pAllKeys,
+//     pAllValues,
+//     pAllUUIDs,
+//     numBuckets,
+//     -1
+//   );
+
+//   // Load keys
+//   KeyType keys[KPT][KeySize];
+//   ValueType values[KPT][ValueSize];
+//   ValueType fallbackValue[ValueSize];
+//   #pragma unroll
+//   for (int i=0; i<KPT; i++){
+//     ll_t offset = kStart + i * TPB + tid;
+//     if (offset < numKeys){
+//       #pragma unroll
+//       for (int j=0; j<KeySize; j++){
+//         keys[i][j] = pKeys[offset * KeySize + j];
+//       }
+//     }
+//   }
+  
+//   // #pragma unroll
+//   // for (int i=0; i<ValueSize; i++){
+//   //   fallbackValue[i] = pFallbackValue[i];
+//   // }
+//   __shared__ int blockCount[1];
+//   // get values
+//   int threadCount = 0;
+//   // bool isFound[KPT];
+//   #pragma unroll
+//   for (int i=0; i<KPT; i++){
+//     int offset = kStart + i * TPB + tid;
+//     if (offset < numKeys){
+//       bool isFound = hashmap.get(keys[i], values[i], fallbackValue);
+//       if (isFound){
+//         threadCount ++;
+//       }
+//     }
+//   }
+
+//   atomicAdd(blockCount, threadCount);
+//   if (tid == 0){
+//     atomicAdd(pCounts, (ull_t) blockCount[0]);
+//   }
+// }
+
+// extern "C"
+// __global__ void closed_hashmap_get_sparse(
+//   const ll_t* __restrict__ pPrime1, //[KeySize]
+//   const ll_t* __restrict__ pPrime2, //[KeySize]
+//   const ll_t* __restrict__ pAlpha1, //[KeySize]
+//   const ll_t* __restrict__ pAlpha2, //[KeySize]
+//   const ll_t* __restrict__ pBeta1,  //[KeySize]
+//   const ll_t* __restrict__ pBeta2,  //[KeySize]
+//   const KeyType* __restrict__ pKeys,             //[NumKeys, KeySize]
+//   KeyType* pAllKeys,          //[NumBuckets, KeySize]
+//   ValueType* pAllValues,      //[NumBuckets, ValueSize]
+//   ll_t* pAllUUIDs,            //[NumBuckets] 
+  
+//   const ll_t* __restrict__ pOutPrime1, //[KeySize]
+//   const ll_t* __restrict__ pOutPrime2, //[KeySize]
+//   const ll_t* __restrict__ pOutAlpha1, //[KeySize]
+//   const ll_t* __restrict__ pOutAlpha2, //[KeySize]
+//   const ll_t* __restrict__ pOutBeta1,  //[KeySize]
+//   const ll_t* __restrict__ pOutBeta2,  //[KeySize]
+//   KeyType* pOutAllKeys,          //[NumBuckets, KeySize]
+//   ValueType* pOutAllValues,      //[NumBuckets, ValueSize]
+//   ll_t* pOutAllUUIDs,            //[NumBuckets] 
+
+//   ll_t numKeys, ll_t numBuckets, ll_t numOutBuckets
+// ){
+//   constexpr int TPB = _TPB_;
+//   constexpr int KPT = _KPT_;
+//   constexpr int KeySize = _KEYSIZE_;
+//   constexpr int ValueSize = _VALUESIZE_;
+//   constexpr int KPB = TPB * KPT;
+
+//   int tid = threadIdx.x;
+//   ll_t kStart = blockIdx.x * KPB;
+
+//   ClosedHashmap<KeyType, ValueType, KeySize, ValueSize> hashmap(
+//     pPrime1, pPrime2,
+//     pAlpha1, pAlpha2,
+//     pBeta1,  pBeta2,
+//     pAllKeys,
+//     pAllValues,
+//     pAllUUIDs,
+//     numBuckets,
+//     -1
+//   );
+
+//   ClosedHashmap<KeyType, ValueType, KeySize, ValueSize> outHashmap(
+//     pOutPrime1, pOutPrime2,
+//     pOutAlpha1, pOutAlpha2,
+//     pOutBeta1,  pOutBeta2,
+//     pOutAllKeys,
+//     pOutAllValues,
+//     pOutAllUUIDs,
+//     numOutBuckets,
+//     -1
+//   );
+
+
+//   // Load keys
+//   KeyType keys[KPT][KeySize];
+//   ValueType values[KPT][ValueSize];
+//   ValueType fallbackValue[ValueSize];
+//   #pragma unroll
+//   for (int i=0; i<KPT; i++){
+//     ll_t offset = kStart + i * TPB + tid;
+//     if (offset < numKeys){
+//       #pragma unroll
+//       for (int j=0; j<KeySize; j++){
+//         keys[i][j] = pKeys[offset * KeySize + j];
+//       }
+//     }
+//   }
+  
+//   #pragma unroll
+//   for (int i=0; i<ValueSize; i++){
+//     fallbackValue[i] = pFallbackValue[i];
+//   }
+
+//   // get values
+//   bool isFound[KPT];
+//   // hashmap.get_batched<KPT>(keys, values, fallbackValue, isFound);
+//   #pragma unroll
+//   for (int i=0; i<KPT; i++){
+//     int offset = kStart + i * TPB + tid;
+//     if (offset < numKeys){
+//       isFound[i] = hashmap.get(keys[i], values[i], fallbackValue);
+//       if (isFound[i]){
+//         outHashmap.set(keys[i], values[i]);
+//       //   #pragma unroll
+//       //   for (int j=0; j<ValueSize; j++){
+//       //     pValues[offset * ValueSize + j] = values[i][j];
+//       //   }
+//       }
+//     }
+//   }
+//   #pragma unroll
+//   for (int i=0; i<KPT; i++){
+//     int offset = kStart + i * TPB + tid;
+//     if (offset < numKeys){
+// }

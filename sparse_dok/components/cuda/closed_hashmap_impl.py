@@ -75,6 +75,16 @@ class ClosedHashmapImplCuda(CudaCallable):
         "--device-c",
       )
     )
+
+    self._remove_fn = cp.RawKernel(
+      self.kernel,
+      "closed_hashmap_remove",
+      backend="nvcc",
+      options=(
+        '-std=c++17',
+        "--device-c",
+      )
+    )
     # self.fn.max_dynamic_shared_size_bytes = self.smem_size
   
   def get(
@@ -225,3 +235,62 @@ class ClosedHashmapImplCuda(CudaCallable):
       ]
     )
     return is_stored
+
+  def remove(
+      self,
+      prime1,
+      prime2,
+      alpha1,
+      alpha2,
+      beta1,
+      beta2,
+      key_perm ,
+      keys, #[n_keys, key_size]
+      all_keys, #[n_all_keys, key_size]
+      all_values, #[n_all_keys, value_size]
+      all_uuids, #[n_all_keys]
+    ):
+    assert keys.ndim == all_keys.ndim == all_values.ndim == 2
+    assert all_keys.shape[1] == keys.shape[1] == self.key_size
+    assert all_values.shape[1] == self.value_size
+    assert keys.dtype == all_keys.dtype == self.torch_key_type
+    assert all_values.dtype == self.torch_value_type
+    assert all_keys.shape[0] == all_values.shape[0] == all_uuids.shape[0] != 0
+    assert keys.device == all_keys.device == all_values.device == all_uuids.device == self.device
+    assert alpha1.shape == beta1.shape == prime1.shape == alpha2.shape == beta2.shape == prime2.shape == (self.key_size, )
+    assert alpha1.dtype == beta1.dtype == prime1.dtype == alpha2.dtype == beta2.dtype == prime2.dtype == torch.long
+    assert alpha1.device == beta1.device == prime1.device == alpha2.device == beta2.device == prime2.device == self.device
+    assert keys.is_contiguous() and all_keys.is_contiguous() and all_values.is_contiguous() and all_uuids.is_contiguous()
+    assert key_perm.shape == alpha1.shape
+    assert key_perm.device == alpha1.device
+    assert key_perm.dtype == torch.long
+
+    
+    n_keys = keys.shape[0]
+    n_buckets = all_keys.shape[0]
+
+    is_removed = torch.zeros(n_keys, device=self.device, dtype=torch.bool)
+
+    blocks_per_grid = ( math.ceil(n_keys / (self.tpb * self.kpt)), )
+    threads_per_block = (self.tpb, )
+    self._remove_fn(
+      grid=blocks_per_grid,
+      block=threads_per_block,
+      args=[
+        prime1.data_ptr(),
+        prime2.data_ptr(),
+        alpha1.data_ptr(), 
+        alpha2.data_ptr(),
+        beta1.data_ptr(),
+        beta2.data_ptr(),
+        key_perm.data_ptr(),
+        keys.data_ptr(), #[n_keys, key_size]
+        all_keys.data_ptr(), #[n_all_keys, key_size]
+        all_values.data_ptr(), #[n_all_keys, value_size]
+        all_uuids.data_ptr(), #[n_all_keys]
+        is_removed.data_ptr(),
+        n_keys, n_buckets,
+      ]
+    )
+
+    return is_removed

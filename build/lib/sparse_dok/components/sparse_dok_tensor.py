@@ -159,7 +159,7 @@ class SparseDOKTensor(object):
     return t
 
   def to_sparse_csr(self):
-    self.to_sparse_coo().to_sparse_csr()
+    return self.to_sparse_coo().to_sparse_csr()
 
   def to_dense(self):
     return self.to_sparse_coo().to_dense()
@@ -266,6 +266,10 @@ class SparseDOKTensor(object):
     broadcasted = torch.broadcast_tensors(*selectors, values)
     selectors = torch.stack(broadcasted[:-1]).view(self.ndim, -1).T.contiguous()
     values = broadcasted[-1].view(-1)[:, None].contiguous()
+    
+    mask = values.squeeze(-1) != 0
+    values = values[mask, :]
+    selectors = selectors[mask, :]
     self._hashmap.set(selectors, values)
 
   def _get_slice_mask(self, slice, dim=0):
