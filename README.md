@@ -1,5 +1,5 @@
 # Sparse DOK (Dictionary of Keys) Tensors on GPU
-Common sparse matrix/tensor formats such as COO, CSR and LIL does not support constant time access/asignment of each individual tensor element. Because of that, PyTorch supports very limited indexing operations for its sparse tensor formats, and numpy-like advanced indexing is abandoned altogether. 
+Common sparse matrix/tensor formats such as COO, CSR and LIL do not support constant time access/asignment of each individual tensor element. Because of that, PyTorch supports very limited indexing operations for its sparse tensor formats, and numpy-like advanced indexing is not supportd for the most part. 
 
 **DOK (Dictionary of Keys)** is a sparse tensor format that uses a hashmap to store index-value pairs. Accessing any individual element, including elements that are zero, is theoretically constant time. DOK format can also be converted to uncoalesced COO format with minimal cost.
 
@@ -127,7 +127,7 @@ keys = torch.rand(n_keys, 3, device="cuda:0")
 values = torch.randint(2**63-1, size=(n_keys, 5), device="cuda:0", dtype=torch.long)
 
 ### set items
-is_set = hashmap[keys] = values
+hashmap[keys] = values
 # or 
 is_set = hashmap.set(keys, values)
 
