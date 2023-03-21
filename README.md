@@ -7,7 +7,7 @@ This repository contains an implementation of sparse DOK tensor format in CUDA a
 
 **note:** currently only nvidia gpus are supported, contributions for cpu/rocm/metal support are welcomed!
 ## Installation
-This package depends on [https://pytorch.org/](pytorch), [https://docs.cupy.dev/en/stable/install.html](cupy-cuda) and [https://docs.sympy.org/latest/install.html](sympy). Please make sure to have a newer versions of these packages before installing sparse_dok.
+This package depends on [pytorch](https://pytorch.org/), [cupy-cuda](https://docs.cupy.dev/en/stable/install.html) and [sympy](https://docs.sympy.org/latest/install.html). Please make sure to have a newer versions of these packages before installing sparse_dok.
 ```bash
 pip install sparse-dok
 ```
