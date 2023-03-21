@@ -20,7 +20,8 @@ setup(
   install_requires=[ 
     'numpy',
     'torch>=1.10.0',
-    'sympy'
+    'sympy',
+    'cupy',
   ],
   classifiers=[
     'Development Status :: 3 - Alpha',

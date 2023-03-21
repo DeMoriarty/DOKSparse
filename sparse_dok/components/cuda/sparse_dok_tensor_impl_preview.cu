@@ -944,7 +944,6 @@ class TensorAccessor{
 #define NOT_FOUND 3
 #define STORED 4
 #define NOT_STORED 5
-#define MAX_STALL_ITERS 10000
 
 template <
   typename key_t,
@@ -966,7 +965,6 @@ class ClosedHashmap{
     ll_t _numBuckets;
     // ll_t _numElements;
     ll_t _emptyMarker;
-    ll_t _occupiedMarker;
     ll_t _removedMarker;
 
   public:
@@ -993,7 +991,6 @@ class ClosedHashmap{
                   , _numBuckets(numBuckets)
                   , _emptyMarker(emptyMarker)
                   , _removedMarker(removedMarker)
-                  , _occupiedMarker(-2) //FIXME:
     {
       #pragma unroll
       for (int i=0; i < KeySize; i++){
@@ -1023,9 +1020,9 @@ class ClosedHashmap{
       _pAllValues = reinterpret_cast<value_t*>(pArgs[KeySize * 7 + 1]);
       _pAllUUIDs = reinterpret_cast<ll_t*>(pArgs[KeySize * 7 + 2]);
       _numBuckets = pArgs[KeySize * 7 + 3];
+      // _numElements = pArgs[KeySize * 7 + 4]; //FIXME: useless for now
       _emptyMarker = pArgs[KeySize * 7 + 4];
       _removedMarker = pArgs[KeySize * 7 + 5];
-      _occupiedMarker = -2; // FIXME: 
     }
 
     CUDA_DEVICE_INLINE
@@ -1125,11 +1122,13 @@ class ClosedHashmap{
     }
 
     CUDA_DEVICE_INLINE
-    bool set_uuid_if_empty(ll_t address, ll_t uuid, ll_t &oldUUID){
+    bool set_uuid_if_empty(int address, ll_t uuid, ll_t &oldUUID){
       ll_t *ptr = &_pAllUUIDs[address];
       // if the value at `ptr` is equal to `_emptyMarker`, then set the value of that pointer to `uuid`, return true
       // else, return false
+      __threadfence();
       oldUUID = atomicCAS(ptr, _emptyMarker, uuid);
+      __threadfence();
       if ( oldUUID == _emptyMarker){
         return true;
       }
@@ -1137,11 +1136,13 @@ class ClosedHashmap{
     }
 
     CUDA_DEVICE_INLINE
-    bool set_uuid_if_removed(ll_t address, ll_t uuid, ll_t &oldUUID){
+    bool set_uuid_if_removed(int address, ll_t uuid, ll_t &oldUUID){
       ll_t *ptr = &_pAllUUIDs[address];
       // if the value at `ptr` is equal to `_removedMarker`, then set the value of that pointer to `uuid`, return true
       // else, return false
+      __threadfence();
       oldUUID = atomicCAS(ptr, _removedMarker, uuid);
+      __threadfence();
       if ( oldUUID == _removedMarker){
         return true;
       }
@@ -1168,7 +1169,7 @@ class ClosedHashmap{
     }
 
      CUDA_DEVICE_INLINE
-    int set_by_uuid(ll_t address, ll_t uuid, key_t key[KeySize], value_t value[ValueSize]){
+    int set_by_uuid(int address, ll_t uuid, key_t key[KeySize], value_t value[ValueSize]){
       // is so, store key and value in this address
       // set key to that address, if storing failed (because of another thread using that address ), return not stored
       ll_t candidateUUID;
@@ -1191,50 +1192,27 @@ class ClosedHashmap{
     }
 
     CUDA_DEVICE_INLINE
-    void lock_address(ll_t address, ll_t& uuid){
-      for (int c=0; c<MAX_STALL_ITERS; c++){
-        __threadfence();
-        uuid = atomicExch(_pAllUUIDs + address, _occupiedMarker);
-        __threadfence();
-        if (uuid != _occupiedMarker){
-          break;
-        }
-        __nanosleep(100);
-      }
-    }
-
-    CUDA_DEVICE_INLINE
-    bool unlock_address(ll_t address, ll_t uuid){
-        __threadfence();
-      ll_t old = atomicCAS(_pAllUUIDs + address, _occupiedMarker, uuid);
-        __threadfence();
-      return old == _occupiedMarker;
-    }
-
-    CUDA_DEVICE_INLINE
     bool exists(
       key_t key[KeySize]
     ){
       // permute_key(key);
-      ll_t startAddress = get_hash(key);
+      ll_t hashCode = get_hash(key);
       ll_t uuid = get_uuid(key);
       #pragma unroll 2
       for (ll_t i=0; i < _numBuckets; i++){
-        ll_t address = (startAddress + i) % _numBuckets;
+        ll_t address = (hashCode + i) % _numBuckets;
         ll_t candidateUUID = get_uuid(address);
-
-        // check if the candidateKey is equal to key
-        bool isFound = candidateUUID == uuid;
-        // if so, return found
-        if (isFound){
-          return true;
-        }
-
         // check if the candidateKey is emptyKey
         bool isEmpty = candidateUUID == _emptyMarker;
         // is so, return not found
         if (isEmpty){
           break;
+        }
+        // check if the candidateKey is equal to key
+        bool isFound = candidateUUID == uuid;
+        // if so, return found
+        if (isFound){
+          return true;
         }
       }
       return false;
@@ -1247,11 +1225,11 @@ class ClosedHashmap{
       value_t fallbackValue[ValueSize]
     ){
       // permute_key(key);
-      ll_t startAddress = get_hash(key);
+      ll_t hashCode = get_hash(key);
       ll_t uuid = get_uuid(key);
       #pragma unroll 2
       for (ll_t i=0; i < _numBuckets; i++){
-        ll_t address = (startAddress + i) % _numBuckets;
+        ll_t address = (hashCode + i) % _numBuckets;
         ll_t candidateUUID = get_uuid(address);
         // check if the candidateKey is emptyKey
         bool isEmpty = candidateUUID == _emptyMarker;
@@ -1280,12 +1258,12 @@ class ClosedHashmap{
       value_t value[ValueSize]
     ){
       // permute_key(key);
-      ll_t startAddress = get_hash(key);
+      ll_t hashCode = get_hash(key);
       ll_t uuid = get_uuid(key);
       ll_t firstRemovedAddress = -1;
       #pragma unroll 2
       for (ll_t i=0; i<_numBuckets; i++){
-        ll_t address = (startAddress + i) % _numBuckets;
+        ll_t address = (hashCode + i) % _numBuckets;
         ll_t candidateUUID;
         candidateUUID = get_uuid(address);
         bool isFound = candidateUUID == uuid;
@@ -1334,21 +1312,11 @@ class ClosedHashmap{
       value_t value[ValueSize]
     ){
       // permute_key(key);
-      ll_t startAddress = get_hash(key) % _numBuckets;
+      ll_t startAddress = get_hash(key);
       ll_t uuid = get_uuid(key);
       ll_t firstRemovedAddress = -1;
-      ll_t startUUID;
-      lock_address(startAddress, startUUID);
-      if ( (startUUID == uuid) || (startUUID == _emptyMarker)){
-        set_key_permuted(startAddress, key);
-        set_value(startAddress, value);
-        set_uuid(startAddress, uuid);
-        return true;
-      } else if (startUUID == _removedMarker){
-        firstRemovedAddress = startAddress;
-      }
       #pragma unroll 2
-      for (ll_t i=1; i<_numBuckets; i++){
+      for (ll_t i=0; i<_numBuckets; i++){
         ll_t address = (startAddress + i) % _numBuckets;
         ll_t candidateUUID;
         candidateUUID = get_uuid(address);
@@ -1357,7 +1325,6 @@ class ClosedHashmap{
         if (isFound){
           set_key_permuted(address, key);
           set_value(address, value);
-          unlock_address(startAddress, startUUID);
           return true;
         }
 
@@ -1372,7 +1339,6 @@ class ClosedHashmap{
             if (set_uuid_if_empty(address, uuid, candidateUUID)){
               set_key_permuted(address, key);
               set_value(address, value);
-              unlock_address(startAddress, startUUID);
               return true;
             }
           } else {
@@ -1387,26 +1353,47 @@ class ClosedHashmap{
           ll_t address = (firstRemovedAddress + i) % _numBuckets;
           ll_t candidateUUID;
           // candidateUUID = get_uuid(address);
-          if (address == startAddress){
+          if (set_uuid_if_removed(address, uuid, candidateUUID)){
             set_key_permuted(address, key);
             set_value(address, value);
-            set_uuid(startAddress, uuid);
-          } else {
-            if (set_uuid_if_removed(address, uuid, candidateUUID)){
-              set_key_permuted(address, key);
-              set_value(address, value);
-              unlock_address(startAddress, startUUID);
-              return true;
-            } else if (set_uuid_if_empty(address, uuid, candidateUUID)){
-              set_key_permuted(address, key);
-              set_value(address, value);
-              unlock_address(startAddress, startUUID);
-              return true;
-            }
+            return true;
+          } else if (set_uuid_if_empty(address, uuid, candidateUUID)){
+            set_key_permuted(address, key);
+            set_value(address, value);
+            return true;
           }
         }
       }
-      unlock_address(startAddress, startUUID);
+      return false;
+    }
+
+    CUDA_DEVICE_INLINE
+    bool set_old(
+      key_t key[KeySize],
+      value_t value[ValueSize]
+    ){
+      // permute_key(key);
+      ll_t hashCode = get_hash(key);
+      ll_t uuid = get_uuid(key);
+      #pragma unroll 2
+      for (ll_t i=0; i<_numBuckets; i++){
+        ll_t address = (hashCode + i) % _numBuckets;
+        ll_t candidateUUID;
+        bool isSuccessful = set_uuid_if_empty(address, uuid, candidateUUID);
+        if (isSuccessful){
+          set_key_permuted(address, key);
+          set_value(address, value);
+          return true;
+        }
+        // check if the candidateUUID is equal to uuid
+        bool isFound = uuid == candidateUUID;
+        // if so, return stored
+        if (isFound){
+          set_key_permuted(address, key);
+          set_value(address, value);
+          return true;
+        }
+      }
       return false;
     }
 
@@ -1414,11 +1401,11 @@ class ClosedHashmap{
     bool remove(
       key_t key[KeySize]
     ){
-      ll_t startAddress = get_hash(key);
+      ll_t hashCode = get_hash(key);
       ll_t uuid = get_uuid(key);
       #pragma unroll 2
       for (ll_t i=0; i < _numBuckets; i++){
-        ll_t address = (startAddress + i) % _numBuckets;
+        ll_t address = (hashCode + i) % _numBuckets;
         ll_t candidateUUID = get_uuid(address);
         // check if the candidateKey is emptyKey
         bool isEmpty = candidateUUID == _emptyMarker;
@@ -1435,6 +1422,120 @@ class ClosedHashmap{
         }
       }
       return false;
+    }
+
+    template <int BatchSize>
+    CUDA_DEVICE_INLINE
+    void get_batched(
+      key_t key[BatchSize][KeySize],
+      value_t value[BatchSize][ValueSize],
+      value_t fallbackValue[ValueSize],
+      bool isFound[BatchSize]
+    ){
+      ll_t hashCode[BatchSize];
+      ll_t uuid[BatchSize];
+      bool isDone[BatchSize];
+      ll_t address[BatchSize];
+      #pragma unroll
+      for (int b = 0; b < BatchSize; b++){
+        hashCode[b] = get_hash(key[b]);
+        uuid[b] = get_uuid(key[b]);
+        isDone[b] = false;
+        isFound[b] = false;
+      }
+      #pragma unroll 2
+      for (ll_t i=0; i < _numBuckets; i++){
+        ll_t candidateUUID[BatchSize];
+        #pragma unroll
+        for (int b = 0; b < BatchSize; b++){
+          address[b] = (hashCode[b] + i) % _numBuckets;
+          candidateUUID[b] = get_uuid(address[b]);
+        }
+        #pragma unroll
+        for (int b = 0; b < BatchSize; b++){
+          // check if the candidateKey is emptyKey
+          bool isEmpty = candidateUUID[b] == _emptyMarker;
+          // is so, return not found
+          if (isEmpty){
+            isDone[b] = true;
+          }
+          // check if the candidateKey is equal to key
+          isFound[b] = candidateUUID[b] == uuid[b];
+          // if so, return found
+          if (isFound[b]){
+            get_value(address[b], value[b]);
+            // return true;
+            isDone[b] = true;
+          }
+        }
+        bool isAllDone = isDone[0];
+        #pragma unroll
+        for (int b=1; b < BatchSize; b++){
+          isAllDone = isAllDone && isDone[b];
+        }
+        if (isAllDone){
+          break;
+        }
+      }
+      #pragma unroll
+      for (int b=0; b<BatchSize; b++){
+        if (!isFound[b]){
+          #pragma unroll
+          for (int j=0; j<ValueSize; j++){
+            value[b][j] = fallbackValue[j];
+          }
+        }
+      }
+    }
+
+    template <int BatchSize>
+    CUDA_DEVICE_INLINE
+    void set_batched(
+      key_t key[BatchSize][KeySize],
+      value_t value[BatchSize][ValueSize],
+      bool isStored[BatchSize]
+    ){
+      ll_t hashCode[BatchSize];
+      ll_t uuid[BatchSize];
+      bool isDone[BatchSize];
+      #pragma unroll
+      for (int b=0; b<BatchSize; b++){
+        hashCode[b] = get_hash(key[b]);
+        uuid[b] = get_uuid(key[b]);
+        isDone[b] = false;
+        isStored[b] = false;
+      }
+
+      #pragma unroll 2
+      for (ll_t i=0; i<_numBuckets; i++){
+        ll_t address[BatchSize];
+        ll_t candidateUUID[BatchSize];
+        bool isSuccessful[BatchSize];
+        #pragma unroll
+        for (int b=0; b<BatchSize; b++){
+          address[b] = (hashCode[b] + i) % _numBuckets;
+          isSuccessful[b] = set_uuid_if_empty(address[b], uuid[b], candidateUUID[b]);
+        }
+
+        #pragma unroll
+        for (int b=0; b<BatchSize; b++){
+          isStored[b] = isSuccessful[b] || (uuid[b] == candidateUUID[b]);
+          if (isStored[b]){
+            set_key(address[b], key[b]);
+            set_value(address[b], value[b]);
+            isDone[b] = true;
+          }
+        }
+
+        bool isAllDone = isDone[0];
+        #pragma unroll
+        for (int b=1; b<BatchSize; b++){
+          isAllDone = isAllDone && isDone[b];
+        }
+        if (isAllDone){
+          break;
+        }
+      }
     }
 };
 using value_t = _VALUETYPE_;

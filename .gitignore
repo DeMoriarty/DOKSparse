@@ -1,5 +1,7 @@
 *\__pycache__
 build
+build/*
+build/lib/*
 dist
 tests
 sparse_dok.egg-info
