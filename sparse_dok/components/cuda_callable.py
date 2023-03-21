@@ -43,8 +43,4 @@ class CudaCallable:
     )
     if max_dynamic_smem:
       fn.max_dynamic_shared_size_bytes = max_dynamic_smem
-    
-    # method_name = f"_{name}"
-    # assert not hasattr(self, method_name), f"kernel {method_name} already exists"
-    # setattr(self, method_name, fn)
     return fn

@@ -23,6 +23,7 @@ class ClosedHashmap{
     ll_t *_pAllUUIDs;
     ll_t _numBuckets;
     ll_t _emptyMarker;
+    ll_t _removedMarker;
 
   public:
     ll_t keyPerm[KeySize];
@@ -39,13 +40,15 @@ class ClosedHashmap{
                   ValueType* pAllValues,
                   ll_t* pAllUUIDs,
                   ll_t numBuckets,
-                  ll_t emptyMarker
+                  ll_t emptyMarker,
+                  ll_t removedMarker
                   )
                   : _pAllKeys(pAllKeys)
                   , _pAllValues(pAllValues)
                   , _pAllUUIDs(pAllUUIDs)
                   , _numBuckets(numBuckets)
                   , _emptyMarker(emptyMarker)
+                  , _removedMarker(removedMarker)
     {
       #pragma unroll
       for (int i=0; i < KeySize; i++){
@@ -168,6 +171,18 @@ class ClosedHashmap{
     }
 
     CUDA_DEVICE_INLINE
+    bool set_uuid_if_removed(int address, ll_t uuid, ll_t &oldUUID){
+      ll_t *ptr = &_pAllUUIDs[address];
+      // if the value at `ptr` is equal to `_removedMarker`, then set the value of that pointer to `uuid`, return true
+      // else, return false
+      oldUUID = atomicCAS(ptr, _removedMarker, uuid);
+      if ( oldUUID != _removedMarker){
+        return false;
+      }
+      return true;
+    }
+
+    CUDA_DEVICE_INLINE
     int get_by_uuid(ll_t address, ll_t uuid, ValueType value[ValueSize]){
       ll_t candidateUUID = get_uuid(address);
       // check if the candidateKey is emptyKey
@@ -251,6 +266,60 @@ class ClosedHashmap{
       // permute_key(key);
       ll_t hashCode = get_hash(key);
       ll_t uuid = get_uuid(key);
+      ll_t firstRemovedAddress = -1;
+      #pragma unroll 2
+      for (ll_t i=0; i<_numBuckets; i++){
+        ll_t address = (hashCode + i) % _numBuckets;
+        ll_t candidateUUID;
+        candidateUUID = get_uuid(address);
+        bool isFound = candidateUUID == uuid;
+        // if key is found, return stored
+        if (isFound){
+          set_key_permuted(address, key);
+          set_value(address, value);
+          return true;
+        }
+
+        bool isRemoved = candidateUUID == _removedMarker;
+        if (isRemoved && firstRemovedAddress == -1){
+          firstRemovedAddress = address;
+        }
+
+        bool isEmpty = candidateUUID == _emptyMarker;
+        if (isEmpty){
+          // if no deletedMarker encountered previously, store key-value pair to nearest empty address.
+          if (firstRemovedAddress == -1){
+            bool isSuccessful = set_uuid_if_empty(address, uuid, candidateUUID);
+            if (isSuccessful){
+              set_key_permuted(address, key);
+              set_value(address, value);
+              return true;
+            }
+          } else {
+          // otherwise, try to store the key-value pair to that deletedMarker, if fail, store to nearest empty address.
+            bool isSuccessful = set_uuid_if_removed(firstRemovedAddress, uuid, candidateUUID);
+            if (isSuccessful){
+              set_key_permuted(firstRemovedAddress, key);
+              set_value(firstRemovedAddress, value);
+              return true;
+            } else {
+              firstRemovedAddress = -1;
+              i--;
+            }
+          }
+        }
+      }
+      return false;
+    }
+
+    CUDA_DEVICE_INLINE
+    bool set_old(
+      KeyType key[KeySize],
+      ValueType value[ValueSize]
+    ){
+      // permute_key(key);
+      ll_t hashCode = get_hash(key);
+      ll_t uuid = get_uuid(key);
       #pragma unroll 2
       for (ll_t i=0; i<_numBuckets; i++){
         ll_t address = (hashCode + i) % _numBuckets;
@@ -267,6 +336,33 @@ class ClosedHashmap{
         if (isFound){
           set_key_permuted(address, key);
           set_value(address, value);
+          return true;
+        }
+      }
+      return false;
+    }
+
+    CUDA_DEVICE_INLINE
+    bool remove(
+      KeyType key[KeySize]
+    ){
+      ll_t hashCode = get_hash(key);
+      ll_t uuid = get_uuid(key);
+      #pragma unroll 2
+      for (ll_t i=0; i < _numBuckets; i++){
+        ll_t address = (hashCode + i) % _numBuckets;
+        ll_t candidateUUID = get_uuid(address);
+        // check if the candidateKey is emptyKey
+        bool isEmpty = candidateUUID == _emptyMarker;
+        // is so, return not found
+        if (isEmpty){
+          break;
+        }
+        // check if the candidateKey is equal to key
+        bool isFound = candidateUUID == uuid;
+        // if so, return found
+        if (isFound){
+          set_uuid(address, _removedMarker);
           return true;
         }
       }
@@ -442,7 +538,8 @@ __global__ void closed_hashmap_get(
     pAllValues,
     pAllUUIDs,
     numBuckets,
-    -1
+    -1,
+    -3
   );
 
   // Load keys
@@ -521,7 +618,8 @@ __global__ void closed_hashmap_set(
     pAllValues,
     pAllUUIDs,
     numBuckets,
-    -1
+    -1,
+    -3
   );
 
   // Load keys
@@ -552,6 +650,70 @@ __global__ void closed_hashmap_set(
     if (offset < numKeys){
       isStored[i] = hashmap.set(keys[i], values[i]);
       pIsStored[offset] = (BoolType) isStored[i];
+    }
+  }
+}
+
+extern "C"
+__global__ void closed_hashmap_remove(
+  const ll_t* __restrict__ pPrime1, //[KeySize]
+  const ll_t* __restrict__ pPrime2, //[KeySize]
+  const ll_t* __restrict__ pAlpha1, //[KeySize]
+  const ll_t* __restrict__ pAlpha2, //[KeySize]
+  const ll_t* __restrict__ pBeta1,  //[KeySize]
+  const ll_t* __restrict__ pBeta2,  //[KeySize]
+  const ll_t* __restrict__ pKeyPerm,             //[KeySize]
+  const KeyType* __restrict__ pKeys,             //[NumKeys, KeySize]
+  KeyType* pAllKeys,          //[NumBuckets, KeySize]
+  ValueType* pAllValues,      //[NumBuckets, ValueSize]
+  ll_t* pAllUUIDs,            //[NumBuckets]
+  BoolType* pIsRemoved,        //[NumKeys]
+  ll_t numKeys, ll_t numBuckets
+){
+  constexpr int TPB = _TPB_;
+  constexpr int KPT = _KPT_;
+  constexpr int KeySize = _KEYSIZE_;
+  constexpr int ValueSize = _VALUESIZE_;
+  constexpr int KPB = TPB * KPT;
+
+  int tid = threadIdx.x;
+  ll_t kStart = blockIdx.x * KPB;
+
+  ClosedHashmap<KeyType, ValueType, KeySize, ValueSize> hashmap(
+    pPrime1, pPrime2,
+    pAlpha1, pAlpha2,
+    pBeta1,  pBeta2,
+    pKeyPerm,
+    pAllKeys,
+    pAllValues,
+    pAllUUIDs,
+    numBuckets,
+    -1,
+    -3
+  );
+
+  // Load keys
+  KeyType keys[KPT][KeySize];
+  #pragma unroll
+  for (int i=0; i<KPT; i++){
+    ll_t offset = kStart + i * TPB + tid;
+    if (offset < numKeys){
+      #pragma unroll
+      for (int j=0; j<KeySize; j++){
+        keys[i][j] = pKeys[offset * KeySize + j];
+        // keys[i][j] = pKeys[offset * KeySize + hashmap.keyPerm[j]];
+      }
+    }
+  }
+  
+  // remove
+  bool isRemoved[KPT];
+  #pragma unroll
+  for (int i=0; i<KPT; i++){
+    int offset = kStart + i * TPB + tid;
+    if (offset < numKeys){
+      isRemoved[i] = hashmap.remove(keys[i]);
+      pIsRemoved[offset] = (BoolType) isRemoved[i];
     }
   }
 }

@@ -162,6 +162,30 @@ long long atomicCAS(
   );
   return reinterpret_cast<ll_t&>(old);
 }
+
+CUDA_DEVICE_INLINE
+long long atomicExch(
+  ll_t *address,
+  ll_t val
+){
+  ull_t old = atomicExch(
+    reinterpret_cast<ull_t*>(address),
+    reinterpret_cast<ull_t&>(val)
+  );
+  return reinterpret_cast<ll_t&>(old);
+}
+
+CUDA_DEVICE_INLINE
+ll_t atomicAdd(
+  ll_t *address,
+  ll_t val
+){
+  ull_t old = atomicAdd(
+    reinterpret_cast<ull_t*>(address),
+    reinterpret_cast<ull_t&>(val)
+  );
+  return reinterpret_cast<ll_t&>(old);
+}
 template <
   typename T
 >
@@ -580,8 +604,8 @@ class SmemTensor4D{
 #define NOT_STORED 5
 
 template <
-  typename KeyType,
-  typename ValueType,
+  typename key_t,
+  typename value_t,
   int KeySize,
   int ValueSize
 >
@@ -593,10 +617,11 @@ class ClosedHashmap{
     ll_t _alpha2[KeySize];
     ll_t _beta1[KeySize];
     ll_t _beta2[KeySize];
-    KeyType *_pAllKeys;
-    ValueType *_pAllValues;
+    key_t *_pAllKeys;
+    value_t *_pAllValues;
     ll_t *_pAllUUIDs;
     ll_t _numBuckets;
+    // ll_t _numElements;
     ll_t _emptyMarker;
     ll_t _removedMarker;
 
@@ -611,8 +636,8 @@ class ClosedHashmap{
                   const ll_t* pBeta1,
                   const ll_t* pBeta2,
                   const ll_t* pKeyPerm,
-                  KeyType* pAllKeys,
-                  ValueType* pAllValues,
+                  key_t* pAllKeys,
+                  value_t* pAllValues,
                   ll_t* pAllUUIDs,
                   ll_t numBuckets,
                   ll_t emptyMarker,
@@ -638,7 +663,28 @@ class ClosedHashmap{
     }
 
     CUDA_DEVICE_INLINE
-    ll_t get_hash(KeyType key[KeySize]){
+    ClosedHashmap(const ll_t* pArgs){
+      #pragma unroll
+      for (int i=0; i < KeySize; i++){
+        _prime1[i] = pArgs[i];
+        _prime2[i] = pArgs[i + KeySize * 1];
+        _alpha1[i] = pArgs[i + KeySize * 2];
+        _alpha2[i] = pArgs[i + KeySize * 3];
+        _beta1[i] = pArgs[i + KeySize * 4];
+        _beta2[i] = pArgs[i + KeySize * 5];
+        keyPerm[i] = pArgs[i + KeySize * 6];
+      }
+      _pAllKeys = reinterpret_cast<key_t*>(pArgs[KeySize * 7]);
+      _pAllValues = reinterpret_cast<value_t*>(pArgs[KeySize * 7 + 1]);
+      _pAllUUIDs = reinterpret_cast<ll_t*>(pArgs[KeySize * 7 + 2]);
+      _numBuckets = pArgs[KeySize * 7 + 3];
+      // _numElements = pArgs[KeySize * 7 + 4]; //FIXME: useless for now
+      _emptyMarker = pArgs[KeySize * 7 + 4];
+      _removedMarker = pArgs[KeySize * 7 + 5];
+    }
+
+    CUDA_DEVICE_INLINE
+    ll_t get_hash(key_t key[KeySize]){
       ll_t hash_code = ( (ll_t) key[0] * _alpha1[0] + _beta1[0]) % _prime1[0];
       #pragma unroll
       for (int i=1; i<KeySize; i++){
@@ -649,7 +695,7 @@ class ClosedHashmap{
     }
 
     CUDA_DEVICE_INLINE
-    ll_t get_uuid(KeyType key[KeySize]){
+    ll_t get_uuid(key_t key[KeySize]){
       ll_t uuid = ( (ll_t) key[0] * _alpha2[0] + _beta2[0]) % _prime2[0];
       #pragma unroll
       for (int i=1; i<KeySize; i++){
@@ -660,7 +706,7 @@ class ClosedHashmap{
     }
 
     CUDA_DEVICE_INLINE
-    bool are_keys_equal(KeyType key1[KeySize], KeyType key2[KeySize]){
+    bool are_keys_equal(key_t key1[KeySize], key_t key2[KeySize]){
       bool isEqual = key1[0] == key2[0];
       #pragma unroll
       for (int i=0; i<KeySize; i++){
@@ -670,7 +716,7 @@ class ClosedHashmap{
     }
 
     CUDA_DEVICE_INLINE
-    void get_key(ll_t address, KeyType key[KeySize]){
+    void get_key(ll_t address, key_t key[KeySize]){
       #pragma unroll
       for (int i=0; i<KeySize; i++){
         key[i] = _pAllKeys[address * KeySize + i];
@@ -678,7 +724,7 @@ class ClosedHashmap{
     }
 
     CUDA_DEVICE_INLINE
-    void get_key_permuted(ll_t address, KeyType key[KeySize]){
+    void get_key_permuted(ll_t address, key_t key[KeySize]){
       #pragma unroll
       for (int i=0; i<KeySize; i++){
         key[i] = _pAllKeys[address * KeySize + keyPerm[i]];
@@ -686,7 +732,7 @@ class ClosedHashmap{
     }
 
     CUDA_DEVICE_INLINE
-    void set_key(ll_t address, KeyType key[KeySize]){
+    void set_key(ll_t address, key_t key[KeySize]){
       #pragma unroll
       for (int i=0; i<KeySize; i++){
         _pAllKeys[address * KeySize + i] = key[i];
@@ -695,7 +741,7 @@ class ClosedHashmap{
     }
 
     CUDA_DEVICE_INLINE
-    void set_key_permuted(ll_t address, KeyType key[KeySize]){
+    void set_key_permuted(ll_t address, key_t key[KeySize]){
       #pragma unroll
       for (int i=0; i<KeySize; i++){
         _pAllKeys[address * KeySize + keyPerm[i] ] = key[i];
@@ -703,7 +749,7 @@ class ClosedHashmap{
     }
 
     CUDA_DEVICE_INLINE
-    void get_value(ll_t address, ValueType value[ValueSize]){
+    void get_value(ll_t address, value_t value[ValueSize]){
       #pragma unroll
       for (int i=0; i<ValueSize; i++){
         value[i] = _pAllValues[address * ValueSize + i];
@@ -711,7 +757,7 @@ class ClosedHashmap{
     }
 
     CUDA_DEVICE_INLINE
-    void set_value(ll_t address, ValueType value[ValueSize]){
+    void set_value(ll_t address, value_t value[ValueSize]){
       #pragma unroll
       for (int i=0; i<ValueSize; i++){
         _pAllValues[address * ValueSize + i] = value[i];
@@ -738,11 +784,13 @@ class ClosedHashmap{
       ll_t *ptr = &_pAllUUIDs[address];
       // if the value at `ptr` is equal to `_emptyMarker`, then set the value of that pointer to `uuid`, return true
       // else, return false
+      __threadfence();
       oldUUID = atomicCAS(ptr, _emptyMarker, uuid);
-      if ( oldUUID != _emptyMarker){
-        return false;
+      __threadfence();
+      if ( oldUUID == _emptyMarker){
+        return true;
       }
-      return true;
+      return false;
     }
 
     CUDA_DEVICE_INLINE
@@ -750,15 +798,17 @@ class ClosedHashmap{
       ll_t *ptr = &_pAllUUIDs[address];
       // if the value at `ptr` is equal to `_removedMarker`, then set the value of that pointer to `uuid`, return true
       // else, return false
+      __threadfence();
       oldUUID = atomicCAS(ptr, _removedMarker, uuid);
-      if ( oldUUID != _removedMarker){
-        return false;
+      __threadfence();
+      if ( oldUUID == _removedMarker){
+        return true;
       }
-      return true;
+      return false;
     }
 
     CUDA_DEVICE_INLINE
-    int get_by_uuid(ll_t address, ll_t uuid, ValueType value[ValueSize]){
+    int get_by_uuid(ll_t address, ll_t uuid, value_t value[ValueSize]){
       ll_t candidateUUID = get_uuid(address);
       // check if the candidateKey is emptyKey
       bool isEmpty = candidateUUID == _emptyMarker;
@@ -777,7 +827,7 @@ class ClosedHashmap{
     }
 
      CUDA_DEVICE_INLINE
-    int set_by_uuid(int address, ll_t uuid, KeyType key[KeySize], ValueType value[ValueSize]){
+    int set_by_uuid(int address, ll_t uuid, key_t key[KeySize], value_t value[ValueSize]){
       // is so, store key and value in this address
       // set key to that address, if storing failed (because of another thread using that address ), return not stored
       ll_t candidateUUID;
@@ -800,10 +850,37 @@ class ClosedHashmap{
     }
 
     CUDA_DEVICE_INLINE
+    bool exists(
+      key_t key[KeySize]
+    ){
+      // permute_key(key);
+      ll_t hashCode = get_hash(key);
+      ll_t uuid = get_uuid(key);
+      #pragma unroll 2
+      for (ll_t i=0; i < _numBuckets; i++){
+        ll_t address = (hashCode + i) % _numBuckets;
+        ll_t candidateUUID = get_uuid(address);
+        // check if the candidateKey is emptyKey
+        bool isEmpty = candidateUUID == _emptyMarker;
+        // is so, return not found
+        if (isEmpty){
+          break;
+        }
+        // check if the candidateKey is equal to key
+        bool isFound = candidateUUID == uuid;
+        // if so, return found
+        if (isFound){
+          return true;
+        }
+      }
+      return false;
+    }
+
+    CUDA_DEVICE_INLINE
     bool get(
-      KeyType key[KeySize],
-      ValueType value[ValueSize],
-      ValueType fallbackValue[ValueSize]
+      key_t key[KeySize],
+      value_t value[ValueSize],
+      value_t fallbackValue[ValueSize]
     ){
       // permute_key(key);
       ll_t hashCode = get_hash(key);
@@ -834,9 +911,9 @@ class ClosedHashmap{
     }
 
     CUDA_DEVICE_INLINE
-    bool set(
-      KeyType key[KeySize],
-      ValueType value[ValueSize]
+    bool set_v0(
+      key_t key[KeySize],
+      value_t value[ValueSize]
     ){
       // permute_key(key);
       ll_t hashCode = get_hash(key);
@@ -871,7 +948,7 @@ class ClosedHashmap{
               return true;
             }
           } else {
-          // otherwise, try to store key-value pair to that deletedMarker, if fail, store to nearest empty address.
+          // otherwise, try to store the key-value pair to that deletedMarker, if fail, store to nearest empty address.
             bool isSuccessful = set_uuid_if_removed(firstRemovedAddress, uuid, candidateUUID);
             if (isSuccessful){
               set_key_permuted(firstRemovedAddress, key);
@@ -888,9 +965,70 @@ class ClosedHashmap{
     }
 
     CUDA_DEVICE_INLINE
+    bool set(
+      key_t key[KeySize],
+      value_t value[ValueSize]
+    ){
+      // permute_key(key);
+      ll_t startAddress = get_hash(key);
+      ll_t uuid = get_uuid(key);
+      ll_t firstRemovedAddress = -1;
+      #pragma unroll 2
+      for (ll_t i=0; i<_numBuckets; i++){
+        ll_t address = (startAddress + i) % _numBuckets;
+        ll_t candidateUUID;
+        candidateUUID = get_uuid(address);
+        bool isFound = candidateUUID == uuid;
+        // if key is found, return stored
+        if (isFound){
+          set_key_permuted(address, key);
+          set_value(address, value);
+          return true;
+        }
+
+        bool isRemoved = candidateUUID == _removedMarker;
+        if (isRemoved && firstRemovedAddress == -1){
+          firstRemovedAddress = address;
+        }
+
+        bool isEmpty = candidateUUID == _emptyMarker;
+        if (isEmpty){
+          if (firstRemovedAddress == -1){
+            if (set_uuid_if_empty(address, uuid, candidateUUID)){
+              set_key_permuted(address, key);
+              set_value(address, value);
+              return true;
+            }
+          } else {
+            break;
+          }
+        }
+      }
+
+      if (firstRemovedAddress != -1){
+        #pragma unroll 2
+        for (ll_t i=0; i<_numBuckets; i++){
+          ll_t address = (firstRemovedAddress + i) % _numBuckets;
+          ll_t candidateUUID;
+          // candidateUUID = get_uuid(address);
+          if (set_uuid_if_removed(address, uuid, candidateUUID)){
+            set_key_permuted(address, key);
+            set_value(address, value);
+            return true;
+          } else if (set_uuid_if_empty(address, uuid, candidateUUID)){
+            set_key_permuted(address, key);
+            set_value(address, value);
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    CUDA_DEVICE_INLINE
     bool set_old(
-      KeyType key[KeySize],
-      ValueType value[ValueSize]
+      key_t key[KeySize],
+      value_t value[ValueSize]
     ){
       // permute_key(key);
       ll_t hashCode = get_hash(key);
@@ -919,7 +1057,7 @@ class ClosedHashmap{
 
     CUDA_DEVICE_INLINE
     bool remove(
-      KeyType key[KeySize]
+      key_t key[KeySize]
     ){
       ll_t hashCode = get_hash(key);
       ll_t uuid = get_uuid(key);
@@ -947,9 +1085,9 @@ class ClosedHashmap{
     template <int BatchSize>
     CUDA_DEVICE_INLINE
     void get_batched(
-      KeyType key[BatchSize][KeySize],
-      ValueType value[BatchSize][ValueSize],
-      ValueType fallbackValue[ValueSize],
+      key_t key[BatchSize][KeySize],
+      value_t value[BatchSize][ValueSize],
+      value_t fallbackValue[ValueSize],
       bool isFound[BatchSize]
     ){
       ll_t hashCode[BatchSize];
@@ -1011,8 +1149,8 @@ class ClosedHashmap{
     template <int BatchSize>
     CUDA_DEVICE_INLINE
     void set_batched(
-      KeyType key[BatchSize][KeySize],
-      ValueType value[BatchSize][ValueSize],
+      key_t key[BatchSize][KeySize],
+      value_t value[BatchSize][ValueSize],
       bool isStored[BatchSize]
     ){
       ll_t hashCode[BatchSize];
@@ -1057,21 +1195,7 @@ class ClosedHashmap{
         }
       }
     }
-
-    // CUDA_DEVICE_INLINE
-    // void permute_key(KeyType key[KeySize]){
-    //   KeyType permutedKey[KeySize];
-    //   #pragma unroll
-    //   for (int i=0; i<KeySize; i++){
-    //     permutedKey[i] = key[keyPerm[i]];
-    //   }
-    //   #pragma unroll
-    //   for (int i=0; i<KeySize; i++){
-    //     key[i] = permutedKey[i];
-    //   }
-    // }
 };
-
 
 using KeyType = _KEYTYPE_;
 using ValueType = _VALUETYPE_;
@@ -1292,178 +1416,3 @@ __global__ void closed_hashmap_remove(
     }
   }
 }
-
-// extern "C"
-// __global__ void closed_hashmap_count_existing(
-//   const ll_t* __restrict__ pPrime1, //[KeySize]
-//   const ll_t* __restrict__ pPrime2, //[KeySize]
-//   const ll_t* __restrict__ pAlpha1, //[KeySize]
-//   const ll_t* __restrict__ pAlpha2, //[KeySize]
-//   const ll_t* __restrict__ pBeta1,  //[KeySize]
-//   const ll_t* __restrict__ pBeta2,  //[KeySize]
-//   const KeyType* __restrict__ pKeys,             //[NumKeys, KeySize]
-//   KeyType* pAllKeys,          //[NumBuckets, KeySize]
-//   ValueType* pAllValues,      //[NumBuckets, ValueSize]
-//   ll_t* pAllUUIDs,            //[NumBuckets]
-//   ull_t* __restrict__ pCounts, //[1]
-//   ll_t numKeys, ll_t numBuckets
-// ){
-//   constexpr int TPB = _TPB_;
-//   constexpr int KPT = _KPT_;
-//   constexpr int KeySize = _KEYSIZE_;
-//   constexpr int ValueSize = _VALUESIZE_;
-//   constexpr int KPB = TPB * KPT;
-
-//   int tid = threadIdx.x;
-//   ll_t kStart = blockIdx.x * KPB;
-
-//   ClosedHashmap<KeyType, ValueType, KeySize, ValueSize> hashmap(
-//     pPrime1, pPrime2,
-//     pAlpha1, pAlpha2,
-//     pBeta1,  pBeta2,
-//     pAllKeys,
-//     pAllValues,
-//     pAllUUIDs,
-//     numBuckets,
-//     -1
-//   );
-
-//   // Load keys
-//   KeyType keys[KPT][KeySize];
-//   ValueType values[KPT][ValueSize];
-//   ValueType fallbackValue[ValueSize];
-//   #pragma unroll
-//   for (int i=0; i<KPT; i++){
-//     ll_t offset = kStart + i * TPB + tid;
-//     if (offset < numKeys){
-//       #pragma unroll
-//       for (int j=0; j<KeySize; j++){
-//         keys[i][j] = pKeys[offset * KeySize + j];
-//       }
-//     }
-//   }
-  
-//   // #pragma unroll
-//   // for (int i=0; i<ValueSize; i++){
-//   //   fallbackValue[i] = pFallbackValue[i];
-//   // }
-//   __shared__ int blockCount[1];
-//   // get values
-//   int threadCount = 0;
-//   // bool isFound[KPT];
-//   #pragma unroll
-//   for (int i=0; i<KPT; i++){
-//     int offset = kStart + i * TPB + tid;
-//     if (offset < numKeys){
-//       bool isFound = hashmap.get(keys[i], values[i], fallbackValue);
-//       if (isFound){
-//         threadCount ++;
-//       }
-//     }
-//   }
-
-//   atomicAdd(blockCount, threadCount);
-//   if (tid == 0){
-//     atomicAdd(pCounts, (ull_t) blockCount[0]);
-//   }
-// }
-
-// extern "C"
-// __global__ void closed_hashmap_get_sparse(
-//   const ll_t* __restrict__ pPrime1, //[KeySize]
-//   const ll_t* __restrict__ pPrime2, //[KeySize]
-//   const ll_t* __restrict__ pAlpha1, //[KeySize]
-//   const ll_t* __restrict__ pAlpha2, //[KeySize]
-//   const ll_t* __restrict__ pBeta1,  //[KeySize]
-//   const ll_t* __restrict__ pBeta2,  //[KeySize]
-//   const KeyType* __restrict__ pKeys,             //[NumKeys, KeySize]
-//   KeyType* pAllKeys,          //[NumBuckets, KeySize]
-//   ValueType* pAllValues,      //[NumBuckets, ValueSize]
-//   ll_t* pAllUUIDs,            //[NumBuckets] 
-  
-//   const ll_t* __restrict__ pOutPrime1, //[KeySize]
-//   const ll_t* __restrict__ pOutPrime2, //[KeySize]
-//   const ll_t* __restrict__ pOutAlpha1, //[KeySize]
-//   const ll_t* __restrict__ pOutAlpha2, //[KeySize]
-//   const ll_t* __restrict__ pOutBeta1,  //[KeySize]
-//   const ll_t* __restrict__ pOutBeta2,  //[KeySize]
-//   KeyType* pOutAllKeys,          //[NumBuckets, KeySize]
-//   ValueType* pOutAllValues,      //[NumBuckets, ValueSize]
-//   ll_t* pOutAllUUIDs,            //[NumBuckets] 
-
-//   ll_t numKeys, ll_t numBuckets, ll_t numOutBuckets
-// ){
-//   constexpr int TPB = _TPB_;
-//   constexpr int KPT = _KPT_;
-//   constexpr int KeySize = _KEYSIZE_;
-//   constexpr int ValueSize = _VALUESIZE_;
-//   constexpr int KPB = TPB * KPT;
-
-//   int tid = threadIdx.x;
-//   ll_t kStart = blockIdx.x * KPB;
-
-//   ClosedHashmap<KeyType, ValueType, KeySize, ValueSize> hashmap(
-//     pPrime1, pPrime2,
-//     pAlpha1, pAlpha2,
-//     pBeta1,  pBeta2,
-//     pAllKeys,
-//     pAllValues,
-//     pAllUUIDs,
-//     numBuckets,
-//     -1
-//   );
-
-//   ClosedHashmap<KeyType, ValueType, KeySize, ValueSize> outHashmap(
-//     pOutPrime1, pOutPrime2,
-//     pOutAlpha1, pOutAlpha2,
-//     pOutBeta1,  pOutBeta2,
-//     pOutAllKeys,
-//     pOutAllValues,
-//     pOutAllUUIDs,
-//     numOutBuckets,
-//     -1
-//   );
-
-
-//   // Load keys
-//   KeyType keys[KPT][KeySize];
-//   ValueType values[KPT][ValueSize];
-//   ValueType fallbackValue[ValueSize];
-//   #pragma unroll
-//   for (int i=0; i<KPT; i++){
-//     ll_t offset = kStart + i * TPB + tid;
-//     if (offset < numKeys){
-//       #pragma unroll
-//       for (int j=0; j<KeySize; j++){
-//         keys[i][j] = pKeys[offset * KeySize + j];
-//       }
-//     }
-//   }
-  
-//   #pragma unroll
-//   for (int i=0; i<ValueSize; i++){
-//     fallbackValue[i] = pFallbackValue[i];
-//   }
-
-//   // get values
-//   bool isFound[KPT];
-//   // hashmap.get_batched<KPT>(keys, values, fallbackValue, isFound);
-//   #pragma unroll
-//   for (int i=0; i<KPT; i++){
-//     int offset = kStart + i * TPB + tid;
-//     if (offset < numKeys){
-//       isFound[i] = hashmap.get(keys[i], values[i], fallbackValue);
-//       if (isFound[i]){
-//         outHashmap.set(keys[i], values[i]);
-//       //   #pragma unroll
-//       //   for (int j=0; j<ValueSize; j++){
-//       //     pValues[offset * ValueSize + j] = values[i][j];
-//       //   }
-//       }
-//     }
-//   }
-//   #pragma unroll
-//   for (int i=0; i<KPT; i++){
-//     int offset = kStart + i * TPB + tid;
-//     if (offset < numKeys){
-// }

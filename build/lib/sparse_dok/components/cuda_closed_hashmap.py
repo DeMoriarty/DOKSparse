@@ -133,26 +133,27 @@ class CudaClosedHashmap:
       assert new.shape == self.key_perm.shape
       self._key_perm = new
 
+  @property
+  def nonempty_mask(self):
+    return (self._uuid != -1) & (self._uuid != -3)
+
   def keys(self):
     if self._keys is None:
       return None
     else:
-      mask = self._uuid != -1
-      keys = self._keys.reshape(self._keys.shape[0], -1)[mask][:, self.key_perm]
+      keys = self._keys.reshape(self._keys.shape[0], -1)[self.nonempty_mask][:, self.key_perm]
       return keys
 
   def values(self):
     if self._values is None:
       return None
     else:
-      mask = self._uuid != -1
-      return self._values[mask]
+      return self._values[self.nonempty_mask]
 
   def set_values(self, selectors, new_values):
-    mask = self._uuid != -1
-    masked_values = self._values[mask]
+    masked_values = self._values[self.nonempty_mask]
     masked_values[selectors] = new_values
-    self._values[mask] = masked_values
+    self._values[self.nonempty_mask] = masked_values
 
   def permute_keys(self, ordering):
     assert self._keys is not None, "hashmap is empty"
@@ -211,8 +212,7 @@ class CudaClosedHashmap:
       return new
 
   def uuid(self):
-    mask = self._uuid != -1
-    return self._uuid[mask]
+    return self._uuid[self.nonempty_mask]
 
   @property
   def n_elements(self):
@@ -389,6 +389,39 @@ class CudaClosedHashmap:
     # print(is_found.sum(), is_found.numel())
     return values, is_found
 
+  def remove(
+      self,
+      keys
+    ):
+    if self._keys is None or self._values is None:
+      raise RuntimeError("store something first")
+      return None, None
+
+    if keys.shape[0] == 0:
+      return torch.zeros(0, device=keys.device, dtype=torch.bool)
+    
+    assert keys.dtype == self._keys.dtype
+    assert keys.device == self._keys.device
+    assert keys.shape[1:] == self.key_shape
+    # keys = keys.contiguous()
+    unique_keys = keys.unique(dim=0)
+    is_removed = self.hashmap_impl_cuda.remove(
+      prime1=self.prime1,
+      prime2=self.prime2,
+      alpha1=self.alpha1,
+      alpha2=self.alpha2,
+      beta1=self.beta1,
+      beta2=self.beta2,
+      key_perm=self.key_perm,
+      keys=unique_keys,
+      all_keys=self._keys,
+      all_values=self._values,
+      all_uuids=self._uuid,
+    )
+
+    self._n_elements -= is_removed.sum()
+    return is_removed
+
   def rehash(self, n_buckets):
     # print(f"rehashing {n_buckets}")
     keys = self.keys().contiguous()
@@ -408,3 +441,6 @@ class CudaClosedHashmap:
 
   def __setitem__(self, keys, values):
     return self.set(keys, values)
+
+  def __delitem__(self, keys):
+    return self.remove(keys)

@@ -2,3 +2,4 @@
 build
 dist
 tests
+sparse_dok.egg-info

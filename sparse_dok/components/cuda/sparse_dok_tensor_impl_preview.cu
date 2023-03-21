@@ -164,6 +164,18 @@ long long atomicCAS(
 }
 
 CUDA_DEVICE_INLINE
+long long atomicExch(
+  ll_t *address,
+  ll_t val
+){
+  ull_t old = atomicExch(
+    reinterpret_cast<ull_t*>(address),
+    reinterpret_cast<ull_t&>(val)
+  );
+  return reinterpret_cast<ll_t&>(old);
+}
+
+CUDA_DEVICE_INLINE
 ll_t atomicAdd(
   ll_t *address,
   ll_t val
@@ -585,11 +597,354 @@ class SmemTensor4D{
       };
     }
 };
+template <typename T, int N>
+CUDA_DEVICE_INLINE
+void warp_sum(T &value){
+  if (N == 32){
+    // warp_sum_32(value);
+    // value += __shfl_xor_sync(-1, value, 1);
+    // value += __shfl_xor_sync(-1, value, 2);
+    // value += __shfl_xor_sync(-1, value, 4);
+    // value += __shfl_xor_sync(-1, value, 8);
+    // value += __shfl_xor_sync(-1, value, 16);
+    value += __shfl_xor_sync(0xffffffff, value, 16);
+    value += __shfl_xor_sync(0xffffffff, value, 8);
+    value += __shfl_xor_sync(0xffffffff, value, 4);
+    value += __shfl_xor_sync(0xffffffff, value, 2);
+    value += __shfl_xor_sync(0xffffffff, value, 1);
+
+  } else if (N == 16){
+    value += __shfl_xor_sync(0xffffffff, value, 8);
+    value += __shfl_xor_sync(0xffffffff, value, 4);
+    value += __shfl_xor_sync(0xffffffff, value, 2);
+    value += __shfl_xor_sync(0xffffffff, value, 1);
+
+  } else if (N == 8){
+    value += __shfl_xor_sync(0xffffffff, value, 4);
+    value += __shfl_xor_sync(0xffffffff, value, 2);
+    value += __shfl_xor_sync(0xffffffff, value, 1);
+    
+  } else if (N == 4){
+    value += __shfl_xor_sync(0xffffffff, value, 2);
+    value += __shfl_xor_sync(0xffffffff, value, 1);
+    
+  } else if (N == 2){
+    value += __shfl_xor_sync(0xffffffff, value, 1);
+    
+  }
+}
+
+template <typename T, int N>
+CUDA_DEVICE_INLINE
+void warp_sum(unsigned int mask, T &value){
+  if (N == 32){
+    value += __shfl_xor_sync(mask, value, 16);
+    value += __shfl_xor_sync(mask, value, 8);
+    value += __shfl_xor_sync(mask, value, 4);
+    value += __shfl_xor_sync(mask, value, 2);
+    value += __shfl_xor_sync(mask, value, 1);
+
+  } else if (N == 16){
+    value += __shfl_xor_sync(mask, value, 8);
+    value += __shfl_xor_sync(mask, value, 4);
+    value += __shfl_xor_sync(mask, value, 2);
+    value += __shfl_xor_sync(mask, value, 1);
+
+  } else if (N == 8){
+    value += __shfl_xor_sync(mask, value, 4);
+    value += __shfl_xor_sync(mask, value, 2);
+    value += __shfl_xor_sync(mask, value, 1);
+    
+  } else if (N == 4){
+    value += __shfl_xor_sync(mask, value, 2);
+    value += __shfl_xor_sync(mask, value, 1);
+    
+  } else if (N == 2){
+    value += __shfl_xor_sync(mask, value, 1);
+    
+  }
+}
+
+template <typename T>
+CUDA_DEVICE_INLINE
+void fast_sum(
+    T &value, 
+    const int i, 
+    T regs[6]
+  ){
+  const int wx = threadIdx.x % 32;
+  const unsigned int mask = 0xffffffff;
+  if (i < 32){
+    regs[0] = value;
+    regs[0] += __shfl_xor_sync(mask, regs[0], 16);
+    if ( (wx / 16) == (i % 2) ){
+      regs[1] = regs[0];
+    }
+
+    if ( i % 2 == 1){
+      regs[1] += __shfl_xor_sync(mask, regs[1], 8);
+      if (((wx / 8) % 2) == ((i % 4) / 2) ){
+        regs[2] = regs[1];
+      }
+    }
+
+    if (i % 4 == 3){
+      regs[2] += __shfl_xor_sync(mask, regs[2], 4);
+      if (((wx / 4) % 2) == ((i % 8) / 4) ){
+        regs[3] = regs[2];
+      }
+    }
+
+    if (i % 8 == 7){
+      regs[3] += __shfl_xor_sync(mask, regs[3], 2);
+      if (((wx / 2) % 2) == ((i % 16) / 8) ){
+        regs[4] = regs[3];
+      }
+    }
+
+    if (i % 16 == 15){
+      regs[4] += __shfl_xor_sync(mask, regs[4], 1);
+      if ( (wx % 2) == (i / 16) ){
+        regs[5] = regs[4];
+      }
+    }
+  } else {
+    int srcLane = (wx / 16) + ((wx % 16) / 8) * 2 + ((wx % 8) / 4) * 4 + ((wx % 4) / 2) * 8 + (wx % 2) * 16;
+    value = __shfl_sync(mask, regs[5], srcLane);
+  }
+}
+
+template <
+    typename T,
+    int ndim
+>
+class StrictTensorAccessor{
+    private:
+        T* _dataPtr;
+    public:
+        ll_t _sizes[ndim];
+        ll_t _strides[ndim];
+
+        CUDA_DEVICE_INLINE
+        StrictTensorAccessor(){
+            
+        };
+
+        CUDA_DEVICE_INLINE
+        StrictTensorAccessor(T* dataPtr,
+                      ll_t sizes[ndim],
+                      ll_t strides[ndim])
+        {
+            this->initialize(dataPtr, sizes, strides);
+        }
+
+        CUDA_DEVICE_INLINE
+        StrictTensorAccessor(const ll_t* argPtr)
+        {
+            
+            this->initialize(argPtr);
+        }
+
+        CUDA_DEVICE_INLINE
+        void initialize(T* dataPtr,
+                        ll_t *sizes,
+                        ll_t *strides)
+        {
+            this->_dataPtr = dataPtr;
+            this->set_sizes(sizes);
+            this->set_strides(strides);
+        }
+
+        CUDA_DEVICE_INLINE
+        void initialize(const ll_t* argPtr)
+        {
+            this->_dataPtr = reinterpret_cast<T*>(argPtr[0]);
+            this->set_sizes(&argPtr[1]);
+            this->set_strides(&argPtr[1 + ndim]);
+        }
+
+        CUDA_DEVICE_INLINE
+        ll_t get_offset(ll_t indices[ndim]){
+            ll_t offset = 0;
+            #pragma unroll
+            for (int i=0; i<ndim; i++){
+                offset += indices[i] * this->_strides[i];
+            }
+            return offset;
+        }
+
+        CUDA_DEVICE_INLINE
+        void get_offset(ll_t indices[ndim], ll_t &offset){
+            offset = 0;
+            #pragma unroll
+            for (int i=0; i<ndim; i++){
+                offset += indices[i] * this->_strides[i];
+            }
+        }
+
+        CUDA_DEVICE_INLINE
+        T get(ll_t indices[ndim]){
+            ll_t offset = this->get_offset(indices);
+            return this->_dataPtr[offset];
+        }
+
+        CUDA_DEVICE_INLINE
+        void set(ll_t indices[ndim], T value){
+            ll_t offset = this->get_offset(indices);
+            this->_dataPtr[offset] = value;
+        }
+
+        CUDA_DEVICE_INLINE
+        void get_index_from_offset(ll_t offset, ll_t indices[ndim]){
+            #pragma unroll
+            for (int i=0; i<ndim; i++){
+                indices[i] = (offset / this->_strides[i]) % this->_sizes[i];
+            }
+        }
+
+        // CUDA_DEVICE_INLINE
+        // void set_strides(ll_t newStrides[ndim]){
+        //     #pragma unroll
+        //     for (int i=0; i<ndim; i++){
+        //         this->_strides[i] = newStrides[i];
+        //     }
+        // }
+
+        CUDA_DEVICE_INLINE
+        void set_strides(const ll_t* newStrides){
+            #pragma unroll
+            for (int i=0; i<ndim; i++){
+                this->_strides[i] = newStrides[i];
+            }
+        }
+
+        // CUDA_DEVICE_INLINE
+        // void set_sizes(ll_t newSizes[ndim]){
+        //     #pragma unroll
+        //     for (int i=0; i<ndim; i++){
+        //         this->_sizes[i] = newSizes[i];
+        //     }
+        // }
+
+        CUDA_DEVICE_INLINE
+        void set_sizes(const ll_t* newSizes){
+            #pragma unroll
+            for (int i=0; i<ndim; i++){
+                this->_sizes[i] = newSizes[i];
+            }
+        }
+
+};
+
+template <
+    typename T
+>
+class TensorAccessor{
+    private:
+        T* _dataPtr;
+    public:
+        const ll_t *_sizes;
+        const ll_t *_strides;
+        ll_t _ndim;
+
+        CUDA_DEVICE_INLINE
+        TensorAccessor(){
+
+        };
+
+        CUDA_DEVICE_INLINE
+        TensorAccessor(T* dataPtr,
+                      ll_t *sizes,
+                      ll_t *strides,
+                      int ndim)
+        {
+            this->initialize(dataPtr, sizes, strides, ndim);
+        }
+
+        CUDA_DEVICE_INLINE
+        TensorAccessor(const ll_t* argPtr, int ndim)
+        {
+            this->initialize(argPtr, ndim);
+        }
+
+        CUDA_DEVICE_INLINE
+        void initialize(T* dataPtr,
+                        ll_t *sizes,
+                        ll_t *strides,
+                        int ndim)
+        {
+            this->_ndim = ndim;
+            this->_dataPtr = dataPtr;
+            this->_sizes = sizes;
+            this->_strides = strides;
+        }
+
+        CUDA_DEVICE_INLINE
+        void initialize(const ll_t* argPtr, int ndim)
+        {
+            this->_ndim = ndim;
+            this->_dataPtr = reinterpret_cast<T*>(argPtr[0]);
+            this->_sizes = &argPtr[1];
+            this->_strides = &argPtr[1 + ndim];
+        }
+
+        CUDA_DEVICE_INLINE
+        ll_t get_offset(ll_t *indices){
+            ll_t offset = 0;
+            for (int i=0; i<this->_ndim; i++){
+                offset += indices[i] * this->_strides[i];
+            }
+            return offset;
+        }
+
+        CUDA_DEVICE_INLINE
+        void get_offset(ll_t *indices, ll_t &offset){
+            offset = 0;
+            for (int i=0; i<this->_ndim; i++){
+                offset += indices[i] * this->_strides[i];
+            }
+        }
+
+        CUDA_DEVICE_INLINE
+        T get(ll_t *indices){
+            ll_t offset = this->get_offset(indices);
+            return this->_dataPtr[offset];
+        }
+
+        CUDA_DEVICE_INLINE
+        void set(ll_t *indices, T value){
+            ll_t offset = this->get_offset(indices);
+            this->_dataPtr[offset] = value;
+        }
+
+        CUDA_DEVICE_INLINE
+        void get_index_from_offset(ll_t offset, ll_t *indices){
+            for (int i=0; i<this->_ndim; i++){
+                indices[i] = (offset / this->_strides[i]) % this->_sizes[i];
+            }
+        }
+
+        CUDA_DEVICE_INLINE
+        void set_strides(const ll_t *newStrides){
+            for (int i=0; i<this->_ndim; i++){
+                this->_strides[i] = newStrides[i];
+            }
+        }
+
+        CUDA_DEVICE_INLINE
+        void set_sizes(const ll_t* newSizes){
+            for (int i=0; i<this->_ndim; i++){
+                this->_sizes[i] = newSizes[i];
+            }
+        }
+
+};
 #define EMPTY 1
 #define FOUND 2
 #define NOT_FOUND 3
 #define STORED 4
 #define NOT_STORED 5
+#define MAX_STALL_ITERS 10000
 
 template <
   typename key_t,
@@ -611,6 +966,7 @@ class ClosedHashmap{
     ll_t _numBuckets;
     // ll_t _numElements;
     ll_t _emptyMarker;
+    ll_t _occupiedMarker;
     ll_t _removedMarker;
 
   public:
@@ -637,6 +993,7 @@ class ClosedHashmap{
                   , _numBuckets(numBuckets)
                   , _emptyMarker(emptyMarker)
                   , _removedMarker(removedMarker)
+                  , _occupiedMarker(-2) //FIXME:
     {
       #pragma unroll
       for (int i=0; i < KeySize; i++){
@@ -666,9 +1023,9 @@ class ClosedHashmap{
       _pAllValues = reinterpret_cast<value_t*>(pArgs[KeySize * 7 + 1]);
       _pAllUUIDs = reinterpret_cast<ll_t*>(pArgs[KeySize * 7 + 2]);
       _numBuckets = pArgs[KeySize * 7 + 3];
-      // _numElements = pArgs[KeySize * 7 + 4]; //FIXME: useless for now
       _emptyMarker = pArgs[KeySize * 7 + 4];
       _removedMarker = pArgs[KeySize * 7 + 5];
+      _occupiedMarker = -2; // FIXME: 
     }
 
     CUDA_DEVICE_INLINE
@@ -768,27 +1125,27 @@ class ClosedHashmap{
     }
 
     CUDA_DEVICE_INLINE
-    bool set_uuid_if_empty(int address, ll_t uuid, ll_t &oldUUID){
+    bool set_uuid_if_empty(ll_t address, ll_t uuid, ll_t &oldUUID){
       ll_t *ptr = &_pAllUUIDs[address];
       // if the value at `ptr` is equal to `_emptyMarker`, then set the value of that pointer to `uuid`, return true
       // else, return false
       oldUUID = atomicCAS(ptr, _emptyMarker, uuid);
-      if ( oldUUID != _emptyMarker){
-        return false;
+      if ( oldUUID == _emptyMarker){
+        return true;
       }
-      return true;
+      return false;
     }
 
     CUDA_DEVICE_INLINE
-    bool set_uuid_if_removed(int address, ll_t uuid, ll_t &oldUUID){
+    bool set_uuid_if_removed(ll_t address, ll_t uuid, ll_t &oldUUID){
       ll_t *ptr = &_pAllUUIDs[address];
       // if the value at `ptr` is equal to `_removedMarker`, then set the value of that pointer to `uuid`, return true
       // else, return false
       oldUUID = atomicCAS(ptr, _removedMarker, uuid);
-      if ( oldUUID != _removedMarker){
-        return false;
+      if ( oldUUID == _removedMarker){
+        return true;
       }
-      return true;
+      return false;
     }
 
     CUDA_DEVICE_INLINE
@@ -811,7 +1168,7 @@ class ClosedHashmap{
     }
 
      CUDA_DEVICE_INLINE
-    int set_by_uuid(int address, ll_t uuid, key_t key[KeySize], value_t value[ValueSize]){
+    int set_by_uuid(ll_t address, ll_t uuid, key_t key[KeySize], value_t value[ValueSize]){
       // is so, store key and value in this address
       // set key to that address, if storing failed (because of another thread using that address ), return not stored
       ll_t candidateUUID;
@@ -834,27 +1191,50 @@ class ClosedHashmap{
     }
 
     CUDA_DEVICE_INLINE
+    void lock_address(ll_t address, ll_t& uuid){
+      for (int c=0; c<MAX_STALL_ITERS; c++){
+        __threadfence();
+        uuid = atomicExch(_pAllUUIDs + address, _occupiedMarker);
+        __threadfence();
+        if (uuid != _occupiedMarker){
+          break;
+        }
+        __nanosleep(100);
+      }
+    }
+
+    CUDA_DEVICE_INLINE
+    bool unlock_address(ll_t address, ll_t uuid){
+        __threadfence();
+      ll_t old = atomicCAS(_pAllUUIDs + address, _occupiedMarker, uuid);
+        __threadfence();
+      return old == _occupiedMarker;
+    }
+
+    CUDA_DEVICE_INLINE
     bool exists(
       key_t key[KeySize]
     ){
       // permute_key(key);
-      ll_t hashCode = get_hash(key);
+      ll_t startAddress = get_hash(key);
       ll_t uuid = get_uuid(key);
       #pragma unroll 2
       for (ll_t i=0; i < _numBuckets; i++){
-        ll_t address = (hashCode + i) % _numBuckets;
+        ll_t address = (startAddress + i) % _numBuckets;
         ll_t candidateUUID = get_uuid(address);
-        // check if the candidateKey is emptyKey
-        bool isEmpty = candidateUUID == _emptyMarker;
-        // is so, return not found
-        if (isEmpty){
-          break;
-        }
+
         // check if the candidateKey is equal to key
         bool isFound = candidateUUID == uuid;
         // if so, return found
         if (isFound){
           return true;
+        }
+
+        // check if the candidateKey is emptyKey
+        bool isEmpty = candidateUUID == _emptyMarker;
+        // is so, return not found
+        if (isEmpty){
+          break;
         }
       }
       return false;
@@ -867,11 +1247,11 @@ class ClosedHashmap{
       value_t fallbackValue[ValueSize]
     ){
       // permute_key(key);
-      ll_t hashCode = get_hash(key);
+      ll_t startAddress = get_hash(key);
       ll_t uuid = get_uuid(key);
       #pragma unroll 2
       for (ll_t i=0; i < _numBuckets; i++){
-        ll_t address = (hashCode + i) % _numBuckets;
+        ll_t address = (startAddress + i) % _numBuckets;
         ll_t candidateUUID = get_uuid(address);
         // check if the candidateKey is emptyKey
         bool isEmpty = candidateUUID == _emptyMarker;
@@ -895,17 +1275,17 @@ class ClosedHashmap{
     }
 
     CUDA_DEVICE_INLINE
-    bool set(
+    bool set_v0(
       key_t key[KeySize],
       value_t value[ValueSize]
     ){
       // permute_key(key);
-      ll_t hashCode = get_hash(key);
+      ll_t startAddress = get_hash(key);
       ll_t uuid = get_uuid(key);
       ll_t firstRemovedAddress = -1;
       #pragma unroll 2
       for (ll_t i=0; i<_numBuckets; i++){
-        ll_t address = (hashCode + i) % _numBuckets;
+        ll_t address = (startAddress + i) % _numBuckets;
         ll_t candidateUUID;
         candidateUUID = get_uuid(address);
         bool isFound = candidateUUID == uuid;
@@ -949,32 +1329,84 @@ class ClosedHashmap{
     }
 
     CUDA_DEVICE_INLINE
-    bool set_old(
+    bool set(
       key_t key[KeySize],
       value_t value[ValueSize]
     ){
       // permute_key(key);
-      ll_t hashCode = get_hash(key);
+      ll_t startAddress = get_hash(key) % _numBuckets;
       ll_t uuid = get_uuid(key);
+      ll_t firstRemovedAddress = -1;
+      ll_t startUUID;
+      lock_address(startAddress, startUUID);
+      if ( (startUUID == uuid) || (startUUID == _emptyMarker)){
+        set_key_permuted(startAddress, key);
+        set_value(startAddress, value);
+        set_uuid(startAddress, uuid);
+        return true;
+      } else if (startUUID == _removedMarker){
+        firstRemovedAddress = startAddress;
+      }
       #pragma unroll 2
-      for (ll_t i=0; i<_numBuckets; i++){
-        ll_t address = (hashCode + i) % _numBuckets;
+      for (ll_t i=1; i<_numBuckets; i++){
+        ll_t address = (startAddress + i) % _numBuckets;
         ll_t candidateUUID;
-        bool isSuccessful = set_uuid_if_empty(address, uuid, candidateUUID);
-        if (isSuccessful){
-          set_key_permuted(address, key);
-          set_value(address, value);
-          return true;
-        }
-        // check if the candidateUUID is equal to uuid
-        bool isFound = uuid == candidateUUID;
-        // if so, return stored
+        candidateUUID = get_uuid(address);
+        bool isFound = candidateUUID == uuid;
+        // if key is found, return stored
         if (isFound){
           set_key_permuted(address, key);
           set_value(address, value);
+          unlock_address(startAddress, startUUID);
           return true;
         }
+
+        bool isRemoved = candidateUUID == _removedMarker;
+        if (isRemoved && firstRemovedAddress == -1){
+          firstRemovedAddress = address;
+        }
+
+        bool isEmpty = candidateUUID == _emptyMarker;
+        if (isEmpty){
+          if (firstRemovedAddress == -1){
+            if (set_uuid_if_empty(address, uuid, candidateUUID)){
+              set_key_permuted(address, key);
+              set_value(address, value);
+              unlock_address(startAddress, startUUID);
+              return true;
+            }
+          } else {
+            break;
+          }
+        }
       }
+
+      if (firstRemovedAddress != -1){
+        #pragma unroll 2
+        for (ll_t i=0; i<_numBuckets; i++){
+          ll_t address = (firstRemovedAddress + i) % _numBuckets;
+          ll_t candidateUUID;
+          // candidateUUID = get_uuid(address);
+          if (address == startAddress){
+            set_key_permuted(address, key);
+            set_value(address, value);
+            set_uuid(startAddress, uuid);
+          } else {
+            if (set_uuid_if_removed(address, uuid, candidateUUID)){
+              set_key_permuted(address, key);
+              set_value(address, value);
+              unlock_address(startAddress, startUUID);
+              return true;
+            } else if (set_uuid_if_empty(address, uuid, candidateUUID)){
+              set_key_permuted(address, key);
+              set_value(address, value);
+              unlock_address(startAddress, startUUID);
+              return true;
+            }
+          }
+        }
+      }
+      unlock_address(startAddress, startUUID);
       return false;
     }
 
@@ -982,11 +1414,11 @@ class ClosedHashmap{
     bool remove(
       key_t key[KeySize]
     ){
-      ll_t hashCode = get_hash(key);
+      ll_t startAddress = get_hash(key);
       ll_t uuid = get_uuid(key);
       #pragma unroll 2
       for (ll_t i=0; i < _numBuckets; i++){
-        ll_t address = (hashCode + i) % _numBuckets;
+        ll_t address = (startAddress + i) % _numBuckets;
         ll_t candidateUUID = get_uuid(address);
         // check if the candidateKey is emptyKey
         bool isEmpty = candidateUUID == _emptyMarker;
@@ -1004,338 +1436,317 @@ class ClosedHashmap{
       }
       return false;
     }
-
-    template <int BatchSize>
-    CUDA_DEVICE_INLINE
-    void get_batched(
-      key_t key[BatchSize][KeySize],
-      value_t value[BatchSize][ValueSize],
-      value_t fallbackValue[ValueSize],
-      bool isFound[BatchSize]
-    ){
-      ll_t hashCode[BatchSize];
-      ll_t uuid[BatchSize];
-      bool isDone[BatchSize];
-      ll_t address[BatchSize];
-      #pragma unroll
-      for (int b = 0; b < BatchSize; b++){
-        hashCode[b] = get_hash(key[b]);
-        uuid[b] = get_uuid(key[b]);
-        isDone[b] = false;
-        isFound[b] = false;
-      }
-      #pragma unroll 2
-      for (ll_t i=0; i < _numBuckets; i++){
-        ll_t candidateUUID[BatchSize];
-        #pragma unroll
-        for (int b = 0; b < BatchSize; b++){
-          address[b] = (hashCode[b] + i) % _numBuckets;
-          candidateUUID[b] = get_uuid(address[b]);
-        }
-        #pragma unroll
-        for (int b = 0; b < BatchSize; b++){
-          // check if the candidateKey is emptyKey
-          bool isEmpty = candidateUUID[b] == _emptyMarker;
-          // is so, return not found
-          if (isEmpty){
-            isDone[b] = true;
-          }
-          // check if the candidateKey is equal to key
-          isFound[b] = candidateUUID[b] == uuid[b];
-          // if so, return found
-          if (isFound[b]){
-            get_value(address[b], value[b]);
-            // return true;
-            isDone[b] = true;
-          }
-        }
-        bool isAllDone = isDone[0];
-        #pragma unroll
-        for (int b=1; b < BatchSize; b++){
-          isAllDone = isAllDone && isDone[b];
-        }
-        if (isAllDone){
-          break;
-        }
-      }
-      #pragma unroll
-      for (int b=0; b<BatchSize; b++){
-        if (!isFound[b]){
-          #pragma unroll
-          for (int j=0; j<ValueSize; j++){
-            value[b][j] = fallbackValue[j];
-          }
-        }
-      }
-    }
-
-    template <int BatchSize>
-    CUDA_DEVICE_INLINE
-    void set_batched(
-      key_t key[BatchSize][KeySize],
-      value_t value[BatchSize][ValueSize],
-      bool isStored[BatchSize]
-    ){
-      ll_t hashCode[BatchSize];
-      ll_t uuid[BatchSize];
-      bool isDone[BatchSize];
-      #pragma unroll
-      for (int b=0; b<BatchSize; b++){
-        hashCode[b] = get_hash(key[b]);
-        uuid[b] = get_uuid(key[b]);
-        isDone[b] = false;
-        isStored[b] = false;
-      }
-
-      #pragma unroll 2
-      for (ll_t i=0; i<_numBuckets; i++){
-        ll_t address[BatchSize];
-        ll_t candidateUUID[BatchSize];
-        bool isSuccessful[BatchSize];
-        #pragma unroll
-        for (int b=0; b<BatchSize; b++){
-          address[b] = (hashCode[b] + i) % _numBuckets;
-          isSuccessful[b] = set_uuid_if_empty(address[b], uuid[b], candidateUUID[b]);
-        }
-
-        #pragma unroll
-        for (int b=0; b<BatchSize; b++){
-          isStored[b] = isSuccessful[b] || (uuid[b] == candidateUUID[b]);
-          if (isStored[b]){
-            set_key(address[b], key[b]);
-            set_value(address[b], value[b]);
-            isDone[b] = true;
-          }
-        }
-
-        bool isAllDone = isDone[0];
-        #pragma unroll
-        for (int b=1; b<BatchSize; b++){
-          isAllDone = isAllDone && isDone[b];
-        }
-        if (isAllDone){
-          break;
-        }
-      }
-    }
 };
-
-using KeyType = _KEYTYPE_;
-using ValueType = _VALUETYPE_;
-using BoolType = uint8_t;
+using value_t = _VALUETYPE_;
 
 extern "C"
-__global__ void closed_hashmap_get(
-  const ll_t* __restrict__ pPrime1, //[KeySize]
-  const ll_t* __restrict__ pPrime2, //[KeySize]
-  const ll_t* __restrict__ pAlpha1, //[KeySize]
-  const ll_t* __restrict__ pAlpha2, //[KeySize]
-  const ll_t* __restrict__ pBeta1,  //[KeySize]
-  const ll_t* __restrict__ pBeta2,  //[KeySize]
-  const ll_t* __restrict__ pKeyPerm,             //[KeySize]
-  const KeyType* __restrict__ pKeys,             //[NumKeys, KeySize]
-  ValueType* pValues,         //[NumKeys, ValueSize]
-  KeyType* pAllKeys,          //[NumBuckets, KeySize]
-  ValueType* pAllValues,      //[NumBuckets, ValueSize]
-  ll_t* pAllUUIDs,            //[NumBuckets]
-  const ValueType* __restrict__ pFallbackValue,  //[ValueSize]  
-  BoolType* pIsFound,        //[NumKeys]
-  ll_t numKeys, ll_t numBuckets
+__global__ void sparse_dok_count_items(
+  const ll_t* pHashmapArgs, //
+  const ll_t* pAccessorArgs, //[(1 + 2 * selectorNdim) * nDim]
+  const ll_t* pRealSelectorAccessor, //[(1 + 2 * selectorNdim)]
+  ll_t* pCounts, //[]
+  ll_t nSelectorElements
 ){
   constexpr int TPB = _TPB_;
-  constexpr int KPT = _KPT_;
-  constexpr int KeySize = _KEYSIZE_;
-  constexpr int ValueSize = _VALUESIZE_;
-  constexpr int KPB = TPB * KPT;
+  constexpr int ElementsPerThread = _EPT_;
+  constexpr int SelectorNDIM = _SELECTORNDIM_;
+  constexpr int NDIM = _NDIM_;
 
   int tid = threadIdx.x;
-  ll_t kStart = blockIdx.x * KPB;
+  int lid = tid % 32;
+  int wid = tid / 32;
+  ll_t selectorElementOffsetStart = ( blockIdx.x * TPB + tid ) * ElementsPerThread;
 
-  ClosedHashmap<KeyType, ValueType, KeySize, ValueSize> hashmap(
-    pPrime1, pPrime2,
-    pAlpha1, pAlpha2,
-    pBeta1,  pBeta2,
-    pKeyPerm,
-    pAllKeys,
-    pAllValues,
-    pAllUUIDs,
-    numBuckets,
-    -1,
-    -3
-  );
-
-  // Load keys
-  KeyType keys[KPT][KeySize];
-  ValueType values[KPT][ValueSize];
-  ValueType fallbackValue[ValueSize];
+  ClosedHashmap<ll_t, value_t, NDIM, 1> hashmap(pHashmapArgs);
+  StrictTensorAccessor<ll_t, SelectorNDIM> realSelectorAccessor(pRealSelectorAccessor);
+  StrictTensorAccessor<ll_t, SelectorNDIM> selectorAccessors[NDIM];
+  
   #pragma unroll
-  for (int i=0; i<KPT; i++){
-    ll_t offset = kStart + i * TPB + tid;
-    if (offset < numKeys){
+  for (int i=0; i<NDIM; i++){
+    selectorAccessors[i].initialize(&pAccessorArgs[ (1 + 2 * SelectorNDIM) * i ]);
+  }
+
+  int threadCounts = 0;
+
+  #pragma unroll
+  for (int i=0; i<ElementsPerThread; i++){
+    ll_t selectorElementOffset = selectorElementOffsetStart + i;
+    if (selectorElementOffset < nSelectorElements){
+      ll_t selectorElementIdx[SelectorNDIM];
+      realSelectorAccessor.get_index_from_offset(selectorElementOffset, selectorElementIdx);
+      ll_t index[NDIM];
       #pragma unroll
-      for (int j=0; j<KeySize; j++){
-        keys[i][j] = pKeys[offset * KeySize + j];
-        // keys[i][j] = pKeys[offset * KeySize + hashmap.keyPerm[j]];
+      for (int j=0; j<NDIM; j++){
+        index[j] = selectorAccessors[j].get(selectorElementIdx);
+      }
+
+      // value_t value[1];
+      // value_t fallbackValue[1] = {0};
+      // bool is_found = hashmap.get(index, value, fallbackValue);
+      if (hashmap.exists(index)){
+        threadCounts++;
       }
     }
   }
+  warp_sum<int, 32>(threadCounts);
+  if (lid == 0){
+    atomicAdd(pCounts, threadCounts);
+  }
+}
+
+extern "C"
+__global__ void sparse_dok_zero_items(
+  const ll_t* pHashmapArgs, //
+  const ll_t* pAccessorArgs, //[(1 + 2 * selectorNdim) * nDim]
+  const ll_t* pRealSelectorAccessor, //[(1 + 2 * selectorNdim)]
+  ll_t* pNumRemoved, //[]
+  ll_t nSelectorElements
+){
+  constexpr int TPB = _TPB_;
+  constexpr int ElementsPerThread = _EPT_;
+  constexpr int SelectorNDIM = _SELECTORNDIM_;
+  constexpr int NDIM = _NDIM_;
+
+  int tid = threadIdx.x;
+  int lid = tid % 32;
+  int wid = tid / 32;
+  ll_t selectorElementOffsetStart = ( blockIdx.x * TPB + tid ) * ElementsPerThread;
+
+  ClosedHashmap<ll_t, value_t, NDIM, 1> hashmap(pHashmapArgs);
+  StrictTensorAccessor<ll_t, SelectorNDIM> realSelectorAccessor(pRealSelectorAccessor);
+  StrictTensorAccessor<ll_t, SelectorNDIM> selectorAccessors[NDIM];
   
   #pragma unroll
-  for (int i=0; i<ValueSize; i++){
-    fallbackValue[i] = pFallbackValue[i];
+  for (int i=0; i<NDIM; i++){
+    selectorAccessors[i].initialize(&pAccessorArgs[ (1 + 2 * SelectorNDIM) * i ]);
   }
 
-  // get values
-  bool isFound[KPT];
-  // hashmap.get_batched<KPT>(keys, values, fallbackValue, isFound);
-  #pragma unroll
-  for (int i=0; i<KPT; i++){
-    int offset = kStart + i * TPB + tid;
-    if (offset < numKeys){
-      isFound[i] = hashmap.get(keys[i], values[i], fallbackValue);
+  int threadCounts = 0;
 
-      pIsFound[offset] = (BoolType) isFound[i];
-      if (isFound[i]){
-        #pragma unroll
-        for (int j=0; j<ValueSize; j++){
-          pValues[offset * ValueSize + j] = values[i][j];
-        }
+  #pragma unroll
+  for (int i=0; i<ElementsPerThread; i++){
+    ll_t selectorElementOffset = selectorElementOffsetStart + i;
+    if (selectorElementOffset < nSelectorElements){
+      ll_t selectorElementIdx[SelectorNDIM];
+      realSelectorAccessor.get_index_from_offset(selectorElementOffset, selectorElementIdx);
+      ll_t index[NDIM];
+      #pragma unroll
+      for (int j=0; j<NDIM; j++){
+        index[j] = selectorAccessors[j].get(selectorElementIdx);
+      }
+
+      if (hashmap.remove(index)){
+        threadCounts++;
+      }
+    }
+  }
+  warp_sum<int, 32>(threadCounts);
+  if (lid == 0){
+    atomicAdd(pNumRemoved, threadCounts);
+  }
+}
+
+extern "C"
+__global__ void sparse_dok_get_items(
+  const ll_t* pHashmapArgs, //
+  const ll_t* pAccessorArgs, //[(1 + 2 * selectorNdim) * nDim]
+  const ll_t* pRealSelectorAccessor, //[(1 + 2 * selectorNdim)]
+  const ll_t* pOutHashmapArgs,
+  ll_t nSelectorElements
+){
+  constexpr int TPB = _TPB_;
+  constexpr int ElementsPerThread = _EPT_;
+  constexpr int SelectorNDIM = _SELECTORNDIM_;
+  constexpr int NDIM = _NDIM_;
+
+  int tid = threadIdx.x;
+  int lid = tid % 32;
+  int wid = tid / 32;
+  ll_t selectorElementOffsetStart = ( blockIdx.x * TPB + tid ) * ElementsPerThread;
+
+  ClosedHashmap<ll_t, value_t, NDIM, 1> hashmap(pHashmapArgs);
+  ClosedHashmap<ll_t, value_t, SelectorNDIM, 1> outHashmap(pOutHashmapArgs);
+  StrictTensorAccessor<ll_t, SelectorNDIM> realSelectorAccessor(pRealSelectorAccessor);
+  StrictTensorAccessor<ll_t, SelectorNDIM> selectorAccessors[NDIM];
+  
+  #pragma unroll
+  for (int i=0; i<NDIM; i++){
+    selectorAccessors[i].initialize(&pAccessorArgs[ (1 + 2 * SelectorNDIM) * i ]);
+  }
+
+  int threadCounts = 0;
+
+  #pragma unroll
+  for (int i=0; i<ElementsPerThread; i++){
+    ll_t selectorElementOffset = selectorElementOffsetStart + i;
+    if (selectorElementOffset < nSelectorElements){
+      ll_t selectorElementIdx[SelectorNDIM];
+      realSelectorAccessor.get_index_from_offset(selectorElementOffset, selectorElementIdx);
+      ll_t index[NDIM];
+      #pragma unroll
+      for (int j=0; j<NDIM; j++){
+        index[j] = selectorAccessors[j].get(selectorElementIdx);
+      }
+
+      value_t value[1];
+      value_t fallbackValue[1] = {0};
+      bool is_found = hashmap.get(index, value, fallbackValue);
+      if (is_found){
+        outHashmap.set(selectorElementIdx, value);
       }
     }
   }
 }
 
 extern "C"
-__global__ void closed_hashmap_set(
-  const ll_t* __restrict__ pPrime1, //[KeySize]
-  const ll_t* __restrict__ pPrime2, //[KeySize]
-  const ll_t* __restrict__ pAlpha1, //[KeySize]
-  const ll_t* __restrict__ pAlpha2, //[KeySize]
-  const ll_t* __restrict__ pBeta1,  //[KeySize]
-  const ll_t* __restrict__ pBeta2,  //[KeySize]
-  const ll_t* __restrict__ pKeyPerm,             //[KeySize]
-  const KeyType* __restrict__ pKeys,             //[NumKeys, KeySize]
-  const ValueType* __restrict__ pValues,         //[NumKeys, ValueSize]
-  KeyType* pAllKeys,          //[NumBuckets, KeySize]
-  ValueType* pAllValues,      //[NumBuckets, ValueSize]
-  ll_t* pAllUUIDs,            //[NumBuckets]
-  BoolType* pIsStored,        //[NumKeys]
-  ll_t numKeys, ll_t numBuckets
+__global__ void sparse_dok_set_items_sparse_v1(
+  const ll_t* pSrcIndices, //[selectorNdim, nSrcElements]
+  const value_t* pSrcValues, //[nSrcElements]
+  const ll_t* pHashmapArgs, //
+  const ll_t* pAccessorArgs, //[(1 + 2 * selectorNdim) * nDim]
+  const ll_t* pRealSelectorAccessor, //[(1 + 2 * selectorNdim)]
+  ll_t nSelectorElements,
+  ll_t nSrcElements
 ){
   constexpr int TPB = _TPB_;
-  constexpr int KPT = _KPT_;
-  constexpr int KeySize = _KEYSIZE_;
-  constexpr int ValueSize = _VALUESIZE_;
-  constexpr int KPB = TPB * KPT;
+  constexpr int ElementsPerThread = _EPT_;
+  constexpr int SelectorNDIM = _SELECTORNDIM_;
+  constexpr int NDIM = _NDIM_;
 
   int tid = threadIdx.x;
-  ll_t kStart = blockIdx.x * KPB;
+  int lid = tid % 32;
+  int wid = tid / 32;
+  ll_t srcElementOffsetStart = ( blockIdx.x * TPB + tid ) * ElementsPerThread;
 
-  ClosedHashmap<KeyType, ValueType, KeySize, ValueSize> hashmap(
-    pPrime1, pPrime2,
-    pAlpha1, pAlpha2,
-    pBeta1,  pBeta2,
-    pKeyPerm,
-    pAllKeys,
-    pAllValues,
-    pAllUUIDs,
-    numBuckets,
-    -1,
-    -3
-  );
-
-  // Load keys
-  KeyType keys[KPT][KeySize];
-  ValueType values[KPT][ValueSize];
+  ClosedHashmap<ll_t, value_t, NDIM, 1> destHashmap(pHashmapArgs);
+  StrictTensorAccessor<ll_t, SelectorNDIM> realSelectorAccessor(pRealSelectorAccessor);
+  StrictTensorAccessor<ll_t, SelectorNDIM> selectorAccessors[NDIM];
+  
   #pragma unroll
-  for (int i=0; i<KPT; i++){
-    ll_t offset = kStart + i * TPB + tid;
-    if (offset < numKeys){
-      #pragma unroll
-      for (int j=0; j<KeySize; j++){
-        keys[i][j] = pKeys[offset * KeySize + j];      
-      }
-      #pragma unroll
-      for (int j=0; j<ValueSize; j++){
-        values[i][j] = pValues[offset * ValueSize + j];
-      }
-    }
+  for (int i=0; i<NDIM; i++){
+    selectorAccessors[i].initialize(&pAccessorArgs[ (1 + 2 * SelectorNDIM) * i ]);
   }
 
-  // get values
-  bool isStored[KPT];
-  // hashmap.set_batched<KPT>(keys, values, isStored);
-
   #pragma unroll
-  for (int i=0; i<KPT; i++){
-    int offset = kStart + i * TPB + tid;
-    if (offset < numKeys){
-      isStored[i] = hashmap.set(keys[i], values[i]);
-      pIsStored[offset] = (BoolType) isStored[i];
+  for (int i=0; i<ElementsPerThread; i++){
+    ll_t srcElementOffset = srcElementOffsetStart + i;
+    if (srcElementOffset < nSrcElements){
+      ll_t selectorElementIndex[SelectorNDIM];
+      #pragma unroll
+      for (int j=0; j<SelectorNDIM; j++){
+        selectorElementIndex[j] = pSrcIndices[nSrcElements * j + srcElementOffset];
+      }
+      value_t value[1] = { pSrcValues[srcElementOffset] };
+      ll_t index[NDIM];
+      #pragma unroll
+      for (int j=0; j<NDIM; j++){
+        index[j] = selectorAccessors[j].get(selectorElementIndex);
+      }
+      if (value[0] != 0){
+        destHashmap.set(index, value);
+      }
     }
   }
 }
 
 extern "C"
-__global__ void closed_hashmap_remove(
-  const ll_t* __restrict__ pPrime1, //[KeySize]
-  const ll_t* __restrict__ pPrime2, //[KeySize]
-  const ll_t* __restrict__ pAlpha1, //[KeySize]
-  const ll_t* __restrict__ pAlpha2, //[KeySize]
-  const ll_t* __restrict__ pBeta1,  //[KeySize]
-  const ll_t* __restrict__ pBeta2,  //[KeySize]
-  const ll_t* __restrict__ pKeyPerm,             //[KeySize]
-  const KeyType* __restrict__ pKeys,             //[NumKeys, KeySize]
-  KeyType* pAllKeys,          //[NumBuckets, KeySize]
-  ValueType* pAllValues,      //[NumBuckets, ValueSize]
-  ll_t* pAllUUIDs,            //[NumBuckets]
-  BoolType* pIsRemoved,        //[NumKeys]
-  ll_t numKeys, ll_t numBuckets
+__global__ void sparse_dok_set_items_sparse(
+  const ll_t* pSrcHashmapArgs, //
+  const ll_t* pDestHashmapArgs, //
+  const ll_t* pAccessorArgs, //[(1 + 2 * selectorNdim) * nDim]
+  const ll_t* pRealSelectorAccessor, //[(1 + 2 * selectorNdim)]
+  ll_t* pNumElements,
+  ll_t nSelectorElements
 ){
   constexpr int TPB = _TPB_;
-  constexpr int KPT = _KPT_;
-  constexpr int KeySize = _KEYSIZE_;
-  constexpr int ValueSize = _VALUESIZE_;
-  constexpr int KPB = TPB * KPT;
+  constexpr int ElementsPerThread = _EPT_;
+  constexpr int SelectorNDIM = _SELECTORNDIM_;
+  constexpr int NDIM = _NDIM_;
 
   int tid = threadIdx.x;
-  ll_t kStart = blockIdx.x * KPB;
+  int lid = tid % 32;
+  int wid = tid / 32;
+  ll_t selectorElementOffsetStart = ( blockIdx.x * TPB + tid ) * ElementsPerThread;
 
-  ClosedHashmap<KeyType, ValueType, KeySize, ValueSize> hashmap(
-    pPrime1, pPrime2,
-    pAlpha1, pAlpha2,
-    pBeta1,  pBeta2,
-    pKeyPerm,
-    pAllKeys,
-    pAllValues,
-    pAllUUIDs,
-    numBuckets,
-    -1,
-    -3
-  );
+  ClosedHashmap<ll_t, value_t, SelectorNDIM, 1> srcHashmap(pSrcHashmapArgs);
+  ClosedHashmap<ll_t, value_t, NDIM, 1> destHashmap(pDestHashmapArgs);
+  StrictTensorAccessor<ll_t, SelectorNDIM> realSelectorAccessor(pRealSelectorAccessor);
+  StrictTensorAccessor<ll_t, SelectorNDIM> selectorAccessors[NDIM];
 
-  // Load keys
-  KeyType keys[KPT][KeySize];
   #pragma unroll
-  for (int i=0; i<KPT; i++){
-    ll_t offset = kStart + i * TPB + tid;
-    if (offset < numKeys){
+  for (int i=0; i<NDIM; i++){
+    selectorAccessors[i].initialize(&pAccessorArgs[ (1 + 2 * SelectorNDIM) * i ]);
+  }
+
+  #pragma unroll
+  for (int i=0; i<ElementsPerThread; i++){
+    ll_t selectorElementOffset = selectorElementOffsetStart + i;
+    if (selectorElementOffset < nSelectorElements){
+      ll_t selectorElementIdx[SelectorNDIM];
+      realSelectorAccessor.get_index_from_offset(selectorElementOffset, selectorElementIdx);
+      ll_t index[NDIM];
       #pragma unroll
-      for (int j=0; j<KeySize; j++){
-        keys[i][j] = pKeys[offset * KeySize + j];
-        // keys[i][j] = pKeys[offset * KeySize + hashmap.keyPerm[j]];
+      for (int j=0; j<NDIM; j++){
+        index[j] = selectorAccessors[j].get(selectorElementIdx);
       }
+      // value_t value[1] = { srcAccessor.get(selectorElementIdx) };
+      value_t srcValue[1];
+      value_t destValue[1];
+      value_t fallbackValue[1] = {0};
+      srcHashmap.get(selectorElementIdx, srcValue, fallbackValue);
+      
+      // destHashmap.get(index, destValue, fallbackValue);
+      // if (srcValue[0] == 0 && destValue[0] != 0){
+      //   destHashmap.remove(index);
+      // } else if (srcValue[0] != 0){
+      //   destHashmap.set(index, srcValue);
+      // }
+      destHashmap.set(index, srcValue);
     }
   }
+}
+
+extern "C"
+__global__ void sparse_dok_set_items_dense(
+  const ll_t* pHashmapArgs, //
+  const ll_t* pAccessorArgs, //[(1 + 2 * selectorNdim) * nDim]
+  const ll_t* pRealSelectorAccessor, //[(1 + 2 * selectorNdim)]
+  ll_t nSelectorElements
+){
+  constexpr int TPB = _TPB_;
+  constexpr int ElementsPerThread = _EPT_;
+  constexpr int SelectorNDIM = _SELECTORNDIM_;
+  constexpr int NDIM = _NDIM_;
+
+  int tid = threadIdx.x;
+  int lid = tid % 32;
+  int wid = tid / 32;
+  ll_t selectorElementOffsetStart = ( blockIdx.x * TPB + tid ) * ElementsPerThread;
+
+  ClosedHashmap<ll_t, value_t, NDIM, 1> destHashmap(pHashmapArgs);
+  StrictTensorAccessor<ll_t, SelectorNDIM> realSelectorAccessor(pRealSelectorAccessor);
+  StrictTensorAccessor<ll_t, SelectorNDIM> selectorAccessors[NDIM];
+  StrictTensorAccessor<value_t, SelectorNDIM> srcAccessor(&pAccessorArgs[(1 + 2 * SelectorNDIM) * NDIM]);
+
   
-  // remove
-  bool isRemoved[KPT];
   #pragma unroll
-  for (int i=0; i<KPT; i++){
-    int offset = kStart + i * TPB + tid;
-    if (offset < numKeys){
-      isRemoved[i] = hashmap.remove(keys[i]);
-      pIsRemoved[offset] = (BoolType) isRemoved[i];
+  for (int i=0; i<NDIM; i++){
+    selectorAccessors[i].initialize(&pAccessorArgs[ (1 + 2 * SelectorNDIM) * i ]);
+  }
+
+  #pragma unroll
+  for (int i=0; i<ElementsPerThread; i++){
+    ll_t selectorElementOffset = selectorElementOffsetStart + i;
+    if (selectorElementOffset < nSelectorElements){
+      ll_t selectorElementIdx[SelectorNDIM];
+      realSelectorAccessor.get_index_from_offset(selectorElementOffset, selectorElementIdx);
+      ll_t index[NDIM];
+      #pragma unroll
+      for (int j=0; j<NDIM; j++){
+        index[j] = selectorAccessors[j].get(selectorElementIdx);
+      }
+      value_t value[1] = { srcAccessor.get(selectorElementIdx) };
+      destHashmap.set(index, value);
     }
   }
 }

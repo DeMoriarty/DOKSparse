@@ -162,3 +162,27 @@ long long atomicCAS(
   );
   return reinterpret_cast<ll_t&>(old);
 }
+
+CUDA_DEVICE_INLINE
+long long atomicExch(
+  ll_t *address,
+  ll_t val
+){
+  ull_t old = atomicExch(
+    reinterpret_cast<ull_t*>(address),
+    reinterpret_cast<ull_t&>(val)
+  );
+  return reinterpret_cast<ll_t&>(old);
+}
+
+CUDA_DEVICE_INLINE
+ll_t atomicAdd(
+  ll_t *address,
+  ll_t val
+){
+  ull_t old = atomicAdd(
+    reinterpret_cast<ull_t*>(address),
+    reinterpret_cast<ull_t&>(val)
+  );
+  return reinterpret_cast<ll_t&>(old);
+}

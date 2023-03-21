@@ -83,7 +83,7 @@ def str2dtype(s):
       return torch.int16
     elif s in ["int32", "int"]:
       return torch.int32
-    elif s in ["int 64", "long"]:
+    elif s in ["int64", "long"]:
       return torch.int64
     elif s in ["float16", "half"]:
       return torch.float16
@@ -146,7 +146,8 @@ def unique_first_occurrence(x=None, unique=None, inverse=None, return_indices=Fa
 
   perm = torch.arange(inverse.size(0), dtype=inverse.dtype, device=inverse.device)
   inverse_flipped, perm = inverse.flip([0]), perm.flip([0])
-  perm = inverse_flipped.new_empty(unique.size(0)).scatter_(0, inverse_flipped, perm)
+  if dim is None: dim = 0
+  perm = inverse_flipped.new_empty(unique.size(dim)).scatter_(0, inverse_flipped, perm)
   if return_indices:
     return perm
   else:
@@ -284,3 +285,35 @@ def merge(candidate_pairs, selected_pair_idx, replacement):
   merged_seq += candidate_pairs[1] * (arange > selected_pair_idx[:, None])
   merged_seq += replacement[:, None] * (arange == selected_pair_idx[:, None])
   return merged_seq
+
+def shape_to_stride(shape):
+  if len(shape) > 0:
+    return tuple(np.flip(np.cumprod(shape[1::][::-1])).tolist()) + (1,)
+  else:
+    return tuple()
+
+def get_tensor_accessor_argument_array(*tensors, shape=None, stride=None):
+  assert all(isinstance(tensor, torch.Tensor) for tensor in tensors)
+  assert all(tensor.shape == tensors[0].shape for tensor in tensors), "all tensors must have the same shape"
+  ndim = len(tensors[0].shape)
+  output = torch.zeros(len(tensors), 1 + ndim * 2, dtype=torch.long)
+  output[:, 0] = torch.tensor([tensor.data_ptr() for tensor in tensors], dtype=torch.long)
+  if shape is None:
+    output[:, 1: ndim+1] = torch.tensor([tuple(tensor.size()) for tensor in tensors], dtype=torch.long)
+  else:
+    output[:, 1: ndim+1] = torch.tensor([tuple(shape) for tensor in tensors], dtype=torch.long)
+  
+  if stride is None:
+    output[:, ndim+1:] = torch.tensor([tensor.stride() for tensor in tensors], dtype=torch.long)
+  else:
+    output[:, ndim+1:] = torch.tensor([stride for tensor in tensors], dtype=torch.long)
+  return output
+
+# def lexsort(tensor: torch.Tensor, dim=-1, order=None):
+#   assert tensor.ndim == 2
+#   dim = dim % tensor.ndim
+#   n_sorts = tensor.shape[dim]
+#   if order is None:
+#     order = np.arange(n_sorts)
+#   else:
+#     assert len(order) == n_sorts

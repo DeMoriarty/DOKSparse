@@ -3,46 +3,66 @@ import numpy as np
 from torch import Tensor
 
 from .cuda_closed_hashmap import CudaClosedHashmap
-from ..util import str2dtype, next_power_of_2
+from .cuda.sparse_dok_tensor_impl import SparseDOKTensorImplCuda
+from ..util import str2dtype, next_power_of_2, dtype2ctype, unique_first_occurrence
+from .. import util
 from .. import functions as fs
 
+sparse_dok_tensor_impl_cuda = SparseDOKTensorImplCuda(
+  tpb=256,
+  selector_ndims=[1, 2, 3, 4],
+  value_types=["float", "long", "double"],
+)
+
 class SparseDOKTensor(object):
-  def __init__(self, size, indices=None, values=None, device=None, dtype=None):
+  def __init__(self, size, indices=None, values=None, device=None, dtype=None, storage=None):
     assert isinstance(size, (list, tuple))
     self._size = torch.Size(size)
     
-    if device is None:
-      if indices is not None:
-        self.device = indices.device
+    if storage is None:
+      if device is None:
+        self.device = torch.device("cuda:0")
       else:
-        self.device = "cuda:0"
+        self.device = torch.device(device)
     else:
-      self.device = torch.device(device)
+      assert isinstance(storage, CudaClosedHashmap)
+      self.device = storage.device
 
-    if dtype is None:
-      if values is not None:
-        self._dtype = values.dtype
+    if storage is not None and storage._keys is not None:
+      assert len(storage.key_shape) == 1 and storage.key_shape[0] == self.ndim
+      self._dtype = storage.value_type
+    else:
+      if dtype is None:
+        if values is None:
+          self._dtype = torch.float32
+        else:
+          self._dtype = values.dtype
       else:
-        self._dtype = torch.float32
-    else:
-      self._dtype = str2dtype(dtype)
-
+        self._dtype = str2dtype(dtype)
+    
     if indices is None:
-      self._hashmap = CudaClosedHashmap(
-        n_buckets=32,
-        device=self.device,
-        # subkey_inds=self.subkey_inds,
-      )
+      if storage is None:
+        self._hashmap = CudaClosedHashmap(
+          n_buckets=32,
+          device=self.device,
+        )
+      else:
+        self._hashmap = storage
+
     else:
       assert values is not None
       assert len(indices.shape) == 2
       assert len(values.shape) == 1
       assert indices.shape[1] == values.shape[0]
-      self._hashmap = CudaClosedHashmap(
-        n_buckets=next_power_of_2(values.shape[0]),
-        device=self.device,
-        # subkey_inds=self.subkey_inds,
-      )
+      assert indices.shape[0] == self.ndim
+      if storage is None:
+        self._hashmap = CudaClosedHashmap(
+          n_buckets=next_power_of_2(values.shape[0]),
+          device=self.device,
+        )
+      else:
+        self._hashmap = storage
+
       self._hashmap.set(
         indices.T.to(self.device),
         values.to(device=self.device, dtype=self.dtype)[:, None]
@@ -70,6 +90,24 @@ class SparseDOKTensor(object):
     return cls.from_sparse_coo(tensor.to_sparse())
 
   @classmethod
+  def from_storage(cls, storage: CudaClosedHashmap, size=None):
+    assert isinstance(storage, CudaClosedHashmap)
+    assert storage.value_shape == (1, )
+    assert len(storage.key_shape) == 1
+    ndims = storage.key_shape[0]
+    if size is None:
+      size = storage._keys.max(dim=0).cpu().tolist()
+      size = tuple(size)
+    else:
+      assert len(size) == ndims
+      assert all(i >= 0 for i in size)
+    
+    return cls(
+      size=size,
+      storage=storage
+    )
+
+  @classmethod
   def __torch_function__(cls, func, types, args=(), kwargs=None):
     if kwargs is None:
       kwargs = {}
@@ -93,11 +131,18 @@ class SparseDOKTensor(object):
   def shape(self):
     return self.size()
 
+  def _stride(self, dim=None):
+    stride = util.shape_to_stride(self.shape)
+    if dim is None:
+      return stride
+    else:
+      return stride[dim]
+  
   @property
   def dtype(self):
     return self._dtype
 
-  def clone(self, deepclone=False):
+  def clone(self, deepclone=True):
     new =  SparseDOKTensor(
       size=self._size, 
       indices=None, 
@@ -154,8 +199,7 @@ class SparseDOKTensor(object):
       size=self.shape,
       device=self.device,
       )
-    # t._coalesced_(True)
-    t = t.coalesce()
+    # t = t.coalesce()
     return t
 
   def to_sparse_csr(self):
@@ -173,21 +217,23 @@ class SparseDOKTensor(object):
   def is_coalesced(self):
     return self._is_coalesced
 
-  def _handle_selectors(self, selectors):
-    if isinstance(selectors, (Tensor, slice) ):
+  def _handle_selectors(self, selectors, return_slice_as_tensor=True):
+    if isinstance(selectors, (Tensor, slice, np.ndarray, list) ):
       selectors = (selectors, )
 
     _selectors = []
     for selector in selectors:
       if isinstance(selector, Tensor) and selector.dtype == torch.bool:
+        selector = selector.to(self.device)
         _selectors += selector.nonzero(as_tuple=True)
 
       elif isinstance(selector, Tensor) and selector.dtype in {torch.int64, torch.int32, torch.int16}:
+        selector = selector.to(self.device)
         _selectors.append(selector.long())
       
       elif isinstance(selector, np.ndarray) and selector.dtype == np.bool8:
         selector = torch.from_numpy(selector, device=self.device)
-        _selectors.append(selector.nonzero(as_tuple=True))
+        _selectors += selector.nonzero(as_tuple=True)
 
       elif isinstance(selector, np.ndarray) and selector.dtype in {np.int16, np.int32, np.int64}:
         selector = torch.from_numpy(selector, device=self.device, dtype=torch.long)
@@ -205,7 +251,10 @@ class SparseDOKTensor(object):
 
       else:
         raise ValueError
+
     selectors = _selectors + [slice(None)] * (self.ndim - len(_selectors))
+    scalar_selector_indices = [i for i in range(len(selectors)) if isinstance(selectors[i], torch.Tensor) and selectors[i].ndim == 0]
+
     slices = [selector for selector in selectors if isinstance(selector, slice)]
     if len(selectors) != len(slices):
       broadcasted_shape = torch.broadcast_shapes(*[index.shape for index in selectors if isinstance(index, Tensor)])
@@ -213,6 +262,9 @@ class SparseDOKTensor(object):
       broadcasted_shape = tuple()
 
     selector_ndim = len(broadcasted_shape) + len(slices)
+    for i in range(len(selectors)):
+      if isinstance(selectors[i], torch.Tensor):
+        selectors[i] = torch.broadcast_to(selectors[i], broadcasted_shape)
     # broadcasted_shape = torch.broadcast_shapes(*[index.shape for index in selectors if isinstance(index, Tensor)])
     try:
       first_tensor_idx = [type(i) for i in selectors].index(Tensor)
@@ -237,15 +289,19 @@ class SparseDOKTensor(object):
         stop = self.shape[i] if stop is None else stop
         stop = max(min(stop, self.shape[i]), start)
         # stop = max(start, self.shape[i] if stop is None else stop)
-        newaxis = [None] * selector_ndim
-        newaxis[idx] = slice(None)
-        selectors[i] = torch.arange(start, stop, device=self.device)[newaxis]
-        idx += 1
-    selectors = torch.stack(torch.broadcast_tensors(*selectors))
-    return selectors
+        if return_slice_as_tensor:
+          newaxis = [None] * selector_ndim
+          newaxis[idx] = slice(None)
+          selectors[i] = torch.arange(start, stop, device=self.device)[newaxis]
+          idx += 1
+    # selectors = torch.stack(torch.broadcast_tensors(*selectors))
+    if return_slice_as_tensor:
+      selectors = torch.broadcast_tensors(*selectors)
+    return selectors, scalar_selector_indices
 
   def __getitem__(self, selectors):
-    selectors = self._handle_selectors(selectors)
+    selectors, scalar_selector_indices = self._handle_selectors(selectors)
+    selectors = torch.stack(selectors, dim=0)
     values_shape = selectors.shape[1:]
     selectors = selectors.view(self.ndim, -1)
 
@@ -254,23 +310,46 @@ class SparseDOKTensor(object):
     else:
       values, _ = self._hashmap.get(selectors.T, fallback_value=0)
     values = values.view(values_shape)
+    for i in reversed(scalar_selector_indices):
+      values.squeeze_(i)
     return values
 
   def __setitem__(self, selectors, values):
-    if not isinstance(values, Tensor):
-      values = torch.tensor(values, device=self.device, dtype=self.dtype)
-    else:
-      assert values.dtype == self.dtype
-
-    selectors = self._handle_selectors(selectors).unbind(dim=0)
-    broadcasted = torch.broadcast_tensors(*selectors, values)
-    selectors = torch.stack(broadcasted[:-1]).view(self.ndim, -1).T.contiguous()
-    values = broadcasted[-1].view(-1)[:, None].contiguous()
+    selectors, _ = self._handle_selectors(selectors)
+    broadcasted_shape = selectors[0].shape
     
-    mask = values.squeeze(-1) != 0
-    values = values[mask, :]
-    selectors = selectors[mask, :]
-    self._hashmap.set(selectors, values)
+    if (isinstance(values, Tensor) and values.is_sparse) or isinstance(values, SparseDOKTensor):
+      assert values.shape == broadcasted_shape, f"expecting the value shape to be {broadcasted_shape}, got {values.shape} instead"
+      sparse_dok_tensor_impl_cuda.set_items_sparse(self.storage(), values, selectors)
+
+    elif isinstance(values, Tensor) and not values.is_sparse:
+      values = torch.broadcast_to(values, broadcasted_shape)
+      sparse_dok_tensor_impl_cuda.set_items_dense(self.storage(), values, selectors)
+
+    # if not isinstance(values, Tensor):
+    #   values = torch.tensor(values, device=self.device, dtype=self.dtype)
+    # else:
+    #   assert values.dtype == self.dtype
+
+    # selectors = torch.stack(broadcasted[:-1]).view(self.ndim, -1).T.contiguous()
+    # values = broadcasted[-1].view(-1)[:, None].contiguous()
+    
+    # mask = values.squeeze(-1) != 0
+    # values = values[mask, :]
+    # selectors = selectors[mask, :]
+    # self._hashmap.set(selectors, values)
+
+  def __spgetitem__(self, selectors):
+    selectors, scalar_selector_indices = self._handle_selectors(selectors)
+    broadcasted_shape = selectors[0].shape
+
+    if self._hashmap._values is None:
+      return SparseDOKTensor(size=broadcasted_shape, device=self.device, dtype=self.dtype)
+    else:
+      values_hashmap = sparse_dok_tensor_impl_cuda.get_items(self.storage(), selectors)
+      return SparseDOKTensor.from_storage(values_hashmap, size=broadcasted_shape)
+      # for i in reversed(scalar_selector_indices):
+      #   values.squeeze_(i)
 
   def _get_slice_mask(self, slice, dim=0):
     start, stop, step = slice.start, slice.stop, slice.step
@@ -364,7 +443,7 @@ class SparseDOKTensor(object):
     return self
   
   def permute(self, *ordering):
-    new = self.clone()
+    new = self.clone(False)
     # new._hashmap.permute_keys(ordering)
     new._hashmap.key_perm = ordering
     new._size = torch.Size(new._size[i] for i in ordering)
@@ -397,4 +476,87 @@ class SparseDOKTensor(object):
   def T(self):
     return self.t()
 
+  def flatten(self):
+    indices = self.indices() #[ndim, nnz]
+    values = self.values() #[nnz]
 
+    stride = torch.tensor(self._stride(), device=self.device, dtype=torch.long)[:, None] #[ndim, 1]
+    flat_indices = (indices * stride).sum(dim=0, keepdim=True) #[1, nnz]
+
+    return SparseDOKTensor(
+      size=[np.prod(self.shape)],
+      indices=flat_indices,
+      values=values,
+    )
+
+  def reshape(self, *new_shape):
+    assert np.prod(new_shape) == np.prod(self.shape)
+    new_ndim = len(new_shape)
+
+    flattened = self.flatten()
+    if new_ndim == 1:
+      return flattened
+
+    indices = flattened.indices() #[1, nnz]
+    values = flattened.values() #[nnz]
+
+    new_stride_tensor = torch.tensor(util.shape_to_stride(new_shape), device=self.device, dtype=torch.long)[:, None]
+    new_shape_tensor = torch.tensor(new_shape, device=self.device, dtype=torch.long)[:, None]
+
+    new_indices = indices.expand(len(new_shape), -1) #[new_ndim, nnz]
+    new_indices = torch.div(new_indices, new_stride_tensor, rounding_mode="floor") #[new_ndim, nnz]
+    new_indices = new_indices % new_shape_tensor
+
+    return SparseDOKTensor(
+      size=new_shape,
+      indices=new_indices,
+      values=values,
+    )
+
+  # def squeeze_(self, dim=None):
+  #   if dim is None:
+  #     dim = np.arange(self.ndim)
+  #   elif isinstance(dim, int):
+  #     dim = [dim]
+  #   elif isinstance(dim, (tuple, list)):
+  #     pass
+  #   dim = set(d % self.ndim for d in dim)
+    
+  #   for d in dim:
+  #     assert d < self.ndim
+    
+
+  def abs(self):
+    result = self.clone()
+    result._values().abs_()
+    return result
+
+  def sqrt(self):
+    assert self.dtype in {torch.half, torch.float, torch.double}
+    result = self.clone()
+    result._values().sqrt_()
+    return result
+
+  def ceil(self):
+    assert self.dtype in {torch.half, torch.float, torch.double}
+    result = self.clone()
+    result._values().ceil_()
+    return result
+
+  def floor(self):
+    assert self.dtype in {torch.half, torch.float, torch.double}
+    result = self.clone()
+    result._values().floor_()
+    return result
+
+  def round(self, decimals=None):
+    assert self.dtype in {torch.half, torch.float, torch.double}
+    result = self.clone()
+    result._values().round_(decimals=decimals)
+    return result
+
+  def __repr__(self) -> str:
+    return f"""
+SparseDOKTensor(indices={self.indices()},
+                values={self.values()},
+                size={self.size()}, nnz={self._nnz()}, sparsity={round(self.sparsity, 6)})"""[1:]

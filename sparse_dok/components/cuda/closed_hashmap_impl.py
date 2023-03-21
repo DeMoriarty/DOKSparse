@@ -1,12 +1,15 @@
 import cupy as cp
 import torch
 import math
-from torch import Tensor
+import numpy as np
 
 from ..cuda_callable import CudaCallable
+from .cuda_kernel import CudaKernel
 from ...util import get_absolute_path, dtype2ctype, str2dtype
 
-class ClosedHashmapImplCuda(CudaCallable):
+
+
+class ClosedHashmapImplCuda(CudaKernel):
   def __init__(
       self, 
       tpb=256, 
@@ -16,75 +19,32 @@ class ClosedHashmapImplCuda(CudaCallable):
       value_size=1, 
       value_type="float",
     ):
-    super().__init__()
-    assert 32 <= tpb <= 1024
-    assert kpt >= 1
-    assert key_size >= 1 
-    assert value_size >= 1
-
-    self.tpb = tpb
-    self.kpt = kpt
-    self.torch_key_type = str2dtype(key_type)
-    self.torch_value_type = str2dtype(value_type)
-    self.key_type = dtype2ctype(key_type)
-    self.value_type = dtype2ctype(value_type)
-    self.key_size = key_size
-    self.value_size = value_size
-
-    cu_files = [
-      "head.cu",
-      "smem_tensor.cu",
-      "closed_hashmap_impl.cu",
+    cu_fnames = [
+      "head",
+      "smem_tensor",
+      "closed_hashmap_impl_class",
+      "closed_hashmap_impl",
     ]
-
-    kernel = []
-    for file in cu_files:
-      with open(get_absolute_path("components", "cuda", file), "r") as f:
-        kernel.append(f.read())
-
-    self.kernel = "\n".join(kernel)
-
-    with open(get_absolute_path("components", "cuda", "preview.cu"), "w") as f:
-      f.write(self.kernel)
-
-    self.kernel = (self.kernel
-      .replace("_TPB_", str(self.tpb))
-      .replace("_KPT_", str(self.kpt))
-      .replace("_KEYSIZE_", str(self.key_size))
-      .replace("_VALUESIZE_", str(self.value_size))
-      .replace("_KEYTYPE_", str(self.key_type))
-      .replace("_VALUETYPE_", str(self.value_type))
-    )
-
-    self._get_fn = cp.RawKernel(
-      self.kernel,
+    func_names = [
       "closed_hashmap_get",
-      backend="nvcc",
-      options=(
-        '-std=c++17',
-        "--device-c",
-      )
-    )
-
-    self._set_fn = cp.RawKernel(
-      self.kernel,
       "closed_hashmap_set",
-      backend="nvcc",
-      options=(
-        '-std=c++17',
-        "--device-c",
-      )
+      "closed_hashmap_remove",
+    ]
+    constant_space = {
+      "_TPB_": tpb,
+      "_KPT_": kpt,
+      "_KEYSIZE_": key_size,
+      "_VALUESIZE_": value_size,
+      "_KEYTYPE_": key_type,
+      "_VALUETYPE_": value_type,
+    }
+    super().__init__(
+      cu_files=[get_absolute_path("components", "cuda", f"{name}.cu") for name in cu_fnames],
+      save_preview = get_absolute_path("components", "cuda", f"{cu_fnames[-1]}_preview.cu"),
+      func_names=func_names,
+      constant_space=constant_space,
     )
 
-    self._remove_fn = cp.RawKernel(
-      self.kernel,
-      "closed_hashmap_remove",
-      backend="nvcc",
-      options=(
-        '-std=c++17',
-        "--device-c",
-      )
-    )
     # self.fn.max_dynamic_shared_size_bytes = self.smem_size
   
   def get(
@@ -103,57 +63,64 @@ class ClosedHashmapImplCuda(CudaCallable):
       values = None, #[n_keys, value_size]
       fallback_value = None, #[value_size]
     ):
-    assert keys.ndim == all_keys.ndim == all_values.ndim == 2
-    assert all_keys.shape[1] == keys.shape[1] == self.key_size
-    assert all_values.shape[1] == self.value_size
-    assert keys.dtype == all_keys.dtype == self.torch_key_type
-    assert all_values.dtype == self.torch_value_type
+    assert keys.dtype == all_keys.dtype
+    assert all_keys.shape[1:] == keys.shape[1:]
     assert all_keys.shape[0] == all_values.shape[0] == all_uuids.shape[0] != 0
     assert keys.device == all_keys.device == all_values.device == all_uuids.device == self.device
-    assert alpha1.shape == beta1.shape == prime1.shape == alpha2.shape == beta2.shape == prime2.shape == (self.key_size, )
-    assert alpha1.dtype == beta1.dtype == prime1.dtype == alpha2.dtype == beta2.dtype == prime2.dtype == torch.long
-    assert alpha1.device == beta1.device == prime1.device == alpha2.device == beta2.device == prime2.device == self.device
+    assert alpha1.shape == beta1.shape == prime1.shape == alpha2.shape == beta2.shape == prime2.shape == key_perm.shape == np.prod(all_keys.shape[1:])# == (self.key_size, )
+    assert alpha1.dtype == beta1.dtype == prime1.dtype == alpha2.dtype == beta2.dtype == prime2.dtype == key_perm.dtype == torch.long
+    assert alpha1.device == beta1.device == prime1.device == alpha2.device == beta2.device == prime2.device == key_perm.device == self.device
     assert keys.is_contiguous() and all_keys.is_contiguous() and all_values.is_contiguous() and all_uuids.is_contiguous()
-    assert key_perm.shape == alpha1.shape
-    assert key_perm.device == alpha1.device
-    assert key_perm.dtype == torch.long
+
+    key_type = all_keys.dtype
+    value_type = all_values.dtype
+    key_size = np.prod(all_keys.shape[1:])
+    value_size = np.prod(all_values.shape[1:])
 
     
     n_keys = keys.shape[0]
     n_buckets = all_keys.shape[0]
     if fallback_value is not None:
-      assert fallback_value.dtype == self.torch_value_type
+      assert fallback_value.dtype == value_type
       assert fallback_value.ndim == 1
       assert fallback_value.device == self.device
-      assert fallback_value.shape[0] == self.value_size
+      assert fallback_value.shape == all_values.shape[1:]
     else:
       fallback_value = torch.zeros(
-        self.value_size,
+        value_size,
         device=keys.device,
-        dtype=self.torch_value_type  
+        dtype=value_type  
       )
 
     if values is not None:
-      assert values.dtype == self.torch_value_type
-      assert values.device == self.device
-      assert values.ndim == 2
+      assert values.dtype == value_type
+      assert values.device == all_keys.device
+      # assert values.ndim == 2
       assert values.shape[0] == keys.shape[0]
-      assert values.shape[1] == self.value_size
+      assert values.shape[1:] == all_values.shape[1:]
       assert values.is_contiguous()
     else:
       values = torch.empty(
         n_keys,
-        self.value_size,
+        *all_values.shape[1:],
         device=keys.device,
-        dtype=self.torch_value_type
+        dtype=value_type
       )
       values[:] = fallback_value[None]
 
-    is_found = torch.zeros(n_keys, device=self.device, dtype=torch.bool)
+    is_found = torch.zeros(n_keys, device=all_keys.device, dtype=torch.bool)
 
-    blocks_per_grid = ( math.ceil(n_keys / (self.tpb * self.kpt)), )
-    threads_per_block = (self.tpb, )
-    self._get_fn(
+    constants = {
+      "_KEYTYPE_": dtype2ctype(key_type),
+      "_VALUETYPE_": dtype2ctype(value_type),
+      "_KEYSIZE_": key_size,
+      "_VALUESIZE_": value_size,
+    }
+    constants = {**self._default_constants, **constants}
+
+    blocks_per_grid = ( math.ceil(n_keys / (constants["_TPB_"] * constants["_KPT_"])), )
+    threads_per_block = (constants["_TPB_"], )
+    self.get_function("closed_hashmap_get", constants)(
       grid=blocks_per_grid,
       block=threads_per_block,
       args=[
@@ -192,29 +159,38 @@ class ClosedHashmapImplCuda(CudaCallable):
       all_values, #[n_all_keys, value_size]
       all_uuids, #[n_all_keys]
     ):
-    assert keys.ndim == values.ndim == all_keys.ndim == all_values.ndim == 2
     assert values.shape[0] == keys.shape[0]
-    assert all_keys.shape[1] == keys.shape[1] == self.key_size
-    assert all_values.shape[1] == values.shape[1] == self.value_size
-    assert keys.dtype == all_keys.dtype == self.torch_key_type
-    assert values.dtype == all_values.dtype == self.torch_value_type
+    assert all_keys.shape[1:] == keys.shape[1:]
+    assert all_values.shape[1:] == values.shape[1:]
+    assert keys.dtype == all_keys.dtype
+    assert values.dtype == all_values.dtype
     assert all_keys.shape[0] == all_values.shape[0] == all_uuids.shape[0] != 0
     assert keys.device == values.device == all_keys.device == all_values.device == all_uuids.device == self.device
-    assert alpha1.shape == beta1.shape == prime1.shape == alpha2.shape == beta2.shape == prime2.shape == (self.key_size, )
-    assert alpha1.dtype == beta1.dtype == prime1.dtype == alpha2.dtype == beta2.dtype == prime2.dtype == torch.long
-    assert alpha1.device == beta1.device == prime1.device == alpha2.device == beta2.device == prime2.device == self.device
-    assert key_perm.shape == alpha1.shape
-    assert key_perm.device == alpha1.device
-    assert key_perm.dtype == torch.long
+    assert alpha1.shape == beta1.shape == prime1.shape == alpha2.shape == beta2.shape == prime2.shape == key_perm.shape == np.prod(all_keys.shape[1:])
+    assert alpha1.dtype == beta1.dtype == prime1.dtype == alpha2.dtype == beta2.dtype == prime2.dtype == key_perm.dtype == torch.long
+    assert alpha1.device == beta1.device == prime1.device == alpha2.device == beta2.device == prime2.device == key_perm.device == self.device
     assert keys.is_contiguous() and values.is_contiguous() and all_keys.is_contiguous() and all_values.is_contiguous() and all_uuids.is_contiguous()
+
+    key_type = all_keys.dtype
+    value_type = all_values.dtype
+    key_size = np.prod(all_keys.shape[1:])
+    value_size = np.prod(all_values.shape[1:])
 
     n_keys = keys.shape[0]
     n_buckets = all_keys.shape[0]
     is_stored = torch.zeros(n_keys, device=self.device, dtype=torch.bool)
 
-    blocks_per_grid = ( math.ceil(n_keys / (self.tpb * self.kpt)), )
-    threads_per_block = (self.tpb, )
-    self._set_fn(
+    constants = {
+      "_KEYTYPE_": dtype2ctype(key_type),
+      "_VALUETYPE_": dtype2ctype(value_type),
+      "_KEYSIZE_": key_size,
+      "_VALUESIZE_": value_size,
+    }
+    constants = {**self._default_constants, **constants}
+
+    blocks_per_grid = ( math.ceil(n_keys / (constants["_TPB_"] * constants["_KPT_"])), )
+    threads_per_block = (constants["_TPB_"], )
+    self.get_function("closed_hashmap_set", constants)(
       grid=blocks_per_grid,
       block=threads_per_block,
       args=[
@@ -250,30 +226,36 @@ class ClosedHashmapImplCuda(CudaCallable):
       all_values, #[n_all_keys, value_size]
       all_uuids, #[n_all_keys]
     ):
-    assert keys.ndim == all_keys.ndim == all_values.ndim == 2
-    assert all_keys.shape[1] == keys.shape[1] == self.key_size
-    assert all_values.shape[1] == self.value_size
-    assert keys.dtype == all_keys.dtype == self.torch_key_type
-    assert all_values.dtype == self.torch_value_type
+    assert all_keys.shape[1:] == keys.shape[1:]# == self.key_size
+    assert keys.dtype == all_keys.dtype# == self.torch_key_type
     assert all_keys.shape[0] == all_values.shape[0] == all_uuids.shape[0] != 0
     assert keys.device == all_keys.device == all_values.device == all_uuids.device == self.device
-    assert alpha1.shape == beta1.shape == prime1.shape == alpha2.shape == beta2.shape == prime2.shape == (self.key_size, )
-    assert alpha1.dtype == beta1.dtype == prime1.dtype == alpha2.dtype == beta2.dtype == prime2.dtype == torch.long
-    assert alpha1.device == beta1.device == prime1.device == alpha2.device == beta2.device == prime2.device == self.device
+    assert alpha1.shape == beta1.shape == prime1.shape == alpha2.shape == beta2.shape == prime2.shape == key_perm.shape == np.prod(all_keys.shape[1:])
+    assert alpha1.dtype == beta1.dtype == prime1.dtype == alpha2.dtype == beta2.dtype == prime2.dtype == key_perm.dtype == torch.long
+    assert alpha1.device == beta1.device == prime1.device == alpha2.device == beta2.device == prime2.device == key_perm.device == self.device
     assert keys.is_contiguous() and all_keys.is_contiguous() and all_values.is_contiguous() and all_uuids.is_contiguous()
-    assert key_perm.shape == alpha1.shape
-    assert key_perm.device == alpha1.device
-    assert key_perm.dtype == torch.long
 
-    
+    key_type = all_keys.dtype
+    value_type = all_values.dtype
+    key_size = np.prod(all_keys.shape[1:])
+    value_size = np.prod(all_values.shape[1:])
+
     n_keys = keys.shape[0]
     n_buckets = all_keys.shape[0]
 
     is_removed = torch.zeros(n_keys, device=self.device, dtype=torch.bool)
 
-    blocks_per_grid = ( math.ceil(n_keys / (self.tpb * self.kpt)), )
-    threads_per_block = (self.tpb, )
-    self._remove_fn(
+    constants = {
+      "_KEYTYPE_": dtype2ctype(key_type),
+      "_VALUETYPE_": dtype2ctype(value_type),
+      "_KEYSIZE_": key_size,
+      "_VALUESIZE_": value_size,
+    }
+    constants = {**self._default_constants, **constants}
+
+    blocks_per_grid = ( math.ceil(n_keys / (constants["_TPB_"] * constants["_KPT_"])), )
+    threads_per_block = (constants["_TPB_"], )
+    self.get_function("closed_hashmap_remove", constants)(
       grid=blocks_per_grid,
       block=threads_per_block,
       args=[
