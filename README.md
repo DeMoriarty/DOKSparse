@@ -127,7 +127,7 @@ keys = torch.rand(n_keys, 3, device="cuda:0")
 values = torch.randint(2**63-1, size=(n_keys, 5), device="cuda:0", dtype=torch.long)
 
 ### set items
-is_set = hashmap[keys] = values
+hashmap[keys] = values
 # or 
 is_set = hashmap.set(keys, values)
 
