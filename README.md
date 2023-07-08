@@ -6,6 +6,11 @@ Common sparse matrix/tensor formats such as COO, CSR and LIL do not support cons
 This repository contains an implementation of sparse DOK tensor format in CUDA and pytorch, as well as a hashmap as its backbone. The main goal of this project is to make sparse tensors behave as closely to dense tensors as possible.
 
 **note:** currently only nvidia gpus are supported, contributions for cpu/rocm/metal support are welcomed!
+## Installation
+This package depends on [pytorch](https://pytorch.org/), [cupy](https://docs.cupy.dev/en/stable/install.html) and [sympy](https://docs.sympy.org/latest/install.html). Please make sure to have newer versions of these packages before installing sparse_dok.
+```bash
+pip install sparse-dok
+```
 
 ## Quick Start
 ### Sparse DOK Tensor
