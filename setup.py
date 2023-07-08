@@ -21,7 +21,7 @@ setup(
     'numpy',
     'torch>=1.10.0',
     'sympy',
-    'cupy',
+    # 'cupy',
   ],
   classifiers=[
     'Development Status :: 3 - Alpha',
