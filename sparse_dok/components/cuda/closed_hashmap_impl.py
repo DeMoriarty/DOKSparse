@@ -74,8 +74,8 @@ class ClosedHashmapImplCuda(CudaKernel):
 
     key_type = all_keys.dtype
     value_type = all_values.dtype
-    key_size = np.prod(all_keys.shape[1:])
-    value_size = np.prod(all_values.shape[1:])
+    key_size = int(np.prod(all_keys.shape[1:]))
+    value_size = int(np.prod(all_values.shape[1:]))
 
     
     n_keys = keys.shape[0]
@@ -173,8 +173,8 @@ class ClosedHashmapImplCuda(CudaKernel):
 
     key_type = all_keys.dtype
     value_type = all_values.dtype
-    key_size = np.prod(all_keys.shape[1:])
-    value_size = np.prod(all_values.shape[1:])
+    key_size = int(np.prod(all_keys.shape[1:]))
+    value_size = int(np.prod(all_values.shape[1:]))
 
     n_keys = keys.shape[0]
     n_buckets = all_keys.shape[0]
@@ -237,8 +237,8 @@ class ClosedHashmapImplCuda(CudaKernel):
 
     key_type = all_keys.dtype
     value_type = all_values.dtype
-    key_size = np.prod(all_keys.shape[1:])
-    value_size = np.prod(all_values.shape[1:])
+    key_size = int(np.prod(all_keys.shape[1:]))
+    value_size = int(np.prod(all_values.shape[1:]))
 
     n_keys = keys.shape[0]
     n_buckets = all_keys.shape[0]

@@ -147,6 +147,7 @@ class SparseDOKTensorImplCuda(CudaKernel):
 
     def get_items(self, hashmap: CudaClosedHashmap, selectors: list[Tensor], n=None):
         timer.start("asserts", "get_items")
+        assert hashmap._keys is not None, "attempted to access an uninitialized hashmap"
         assert all(isinstance(selector, Tensor) for selector in selectors), "all selectors must be Long Tensors"
         assert all(selector.dtype == torch.long for selector in selectors), "all selectors must be Long Tensors"
         assert all(selector.device == hashmap.device for selector in selectors), "all selectors must be on the same cuda device as the SparseDOKTensor"
@@ -233,6 +234,11 @@ class SparseDOKTensorImplCuda(CudaKernel):
 
     def set_items_sparse(self, dest_hashmap: CudaClosedHashmap, src: Union[CudaClosedHashmap, Tensor], selectors: list[Tensor]):
         # raise NotImplementedError("this shit isn't working")
+        if dest_hashmap._keys is None:
+          first_key = torch.stack([s.data[0] for s in selectors], dim=0)[None] #[1, num_selectors]
+          first_value = torch.zeros(1, 1, dtype=src.value_type, device=src.device) #[1, 1]
+          dest_hashmap.set(first_key, first_value)
+
         assert dest_hashmap.device == src.device
         assert all(isinstance(selector, Tensor) for selector in selectors), "all selectors must be Long Tensors"
         assert all(selector.dtype == torch.long for selector in selectors), "all selectors must be Long Tensors"
@@ -404,6 +410,11 @@ class SparseDOKTensorImplCuda(CudaKernel):
         # dest_hashmap._n_elements += n_src_elements
 
     def set_items_dense(self, dest_hashmap: CudaClosedHashmap, src: Tensor, selectors: list[Tensor]):
+        if dest_hashmap._keys is None:
+          first_key = torch.stack([s.data[0] for s in selectors], dim=0)[None] #[1, num_selectors]
+          first_value = src.data[0][None] #[1, 1]
+          dest_hashmap.set(first_key, first_value)
+          
         assert dest_hashmap.device == src.device
         assert all(isinstance(selector, Tensor) for selector in selectors), "all selectors must be Long Tensors"
         assert all(selector.dtype == torch.long for selector in selectors), "all selectors must be Long Tensors"
